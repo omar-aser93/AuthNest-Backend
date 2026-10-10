@@ -1,0 +1,549 @@
+// This is Prisma schema file, created by (npx prisma init --datasource-provider mongodb) , to save changes (npx prisma db push, npx prisma generate)
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+
+//User model to store user information
+model User {
+  id                   String            @id @default(auto()) @map("_id") @db.ObjectId  // unique id (primary key)
+  name                 String?
+  email                String            @unique       // unique as it will be used for login
+  password             String?                         // Nullable to support OAuth users
+  image                String?
+  bio                  String?
+  role                 String            @default("user") 
+  isEmailVerified      Boolean           @default(false)              // checks if email is verified (at signup or later manually)
+  emailVerifyToken     String?           @map("email_verify_token")   // token for verify email link (unique link sent in email)
+  emailVerifyExpiry    DateTime?         @map("email_verify_expiry")  // expiry for verify email link
+  resetOtp             String?           @map("reset_otp")            // OTP for password reset
+  resetOtpExpiry       DateTime?         @map("reset_otp_expiry")     // expiry for reset OTP value
+  resetOtpAttempts     Int? @default(0)  @map("reset_otp_attempts")   // number of attempts for reset OTP
+  resetToken           String?           @map("reset_token")          // token after OTP verification (to prevent skipping OTP step)
+  resetTokenExpiry     DateTime?         @map("reset_token_expiry")   // expiry for reset token
+  googleId             String?                     // store Google's sub/id after linking accounts (used to check if account are linked to OAuth)
+  githubId             String?                     // store GitHub's id after linking accounts (used to check if account are linked to OAuth)
+  mergeToken           String?          @map("merge_token")         // temp: for account linking flow
+  mergeTokenExpiry     DateTime?        @map("merge_token_expiry")  // temp: expiry for merge token
+  pendingGoogleId      String?          @map("pending_google_id")   // temp: Google sub awaiting confirmation
+  pendingGithubId      String?          @map("pending_github_id")   // temp: GitHub id awaiting confirmation
+  sessions             Session[]                   // relation to Session model
+  posts                Post[]                      // relation to Post model
+  savedPosts           SavedPost[]                 // relation to SavedPost model
+  comments             Comment[]                   // relation to Comment model
+  postReactions        Reaction[]                  // relation to Post Reaction model 
+  commentReactions     CommentReaction[]           // relation to Comment Reaction model
+  shares               Share[]                     // relation to share post model
+  tagsOnMe             Tag[]             @relation("TaggedUser")      // relation to Tag model (Users tagging me)
+  tagsByMe             Tag[]             @relation("TaggedByUser")    // relation to Tag model (Users I tagged)
+  friendshipsRequested Friendship[]      @relation("requesterRelations") // relation to Friendship model (requests I sent)
+  friendshipsReceived  Friendship[]      @relation("receiverRelations")  // relation to Friendship model (requests I received)
+  editHistory          EditHistory[]                                     // relation to EditHistory model
+  notifications        Notification[]                                    // relation to Notification model (received notifications)
+  notificationsSent    Notification[]    @relation("NotificationSender") // relation to Notification model (notifications I caused)
+  reportsMade          Report[] @relation("ReportsMade")                 // relation -> reports I made
+  reportsReviewed      Report[] @relation("ReportsReviewed")             // relation -> reports I reviewed
+  // ── Ban fields ─────────────────────────────────────────────────────────
+  bannedAt             DateTime?
+  bannedReason         String?
+  bannedBy             User?     @relation("UserBans", fields: [bannedById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  bannedById           String?   @db.ObjectId
+  bansIssued           User[]    @relation("UserBans")
+  // 🔹 Chat back-relations
+  messageReads         MessageRead[]                                 // messages I read
+  messageReactions     MessageReaction[]                             // reactions I made
+  messagesSent         Message[]         @relation("MessagesSent")   // messages I sent
+  conversations        ConversationParticipant[]                     // conversations I participate in 
+  callParticipants     CallParticipant[]                             // calls I participate in   
+  startedCalls         Call[] @relation("StartedCalls")              // calls I started                    
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+}
+
+// SESSION MODEL
+// One row per active login (Chrome, Firefox, phone, admin SPA, etc.). Replaces the old single refreshToken field on User.
+model Session {
+  id               String   @id @default(auto()) @map("_id") @db.ObjectId
+  sessionId        String   @unique                    // UUID, carried in the JWT's `sid` claim
+  user             User     @relation(fields: [userId], references: [id])
+  userId           String   @db.ObjectId
+  refreshTokenHash String
+  userAgent        String?                             // for future "Active sessions" UI
+  ipAddress        String?
+  createdAt        DateTime @default(now())
+  lastUsedAt       DateTime @default(now())            // bumped on every refresh
+  expiresAt        DateTime                            // hard cap, enforced by refresh endpoint
+  @@index([userId])                                    // "all sessions for this user" (ban, logout-all)
+  @@index([expiresAt])                                 // for a future cleanup job
+}
+
+//Post model to store blog post information
+model Post {
+  id             String       @id @default(auto()) @map("_id") @db.ObjectId
+  title          String?      // optional because shared posts may be without new title (just sharing original post), zod validation will handle the case when creating a new post.
+  content        String?      // optional because shared posts may be without new content (just sharing original post), zod validation will handle the case when creating a new post.
+  image          String?  
+  hashtags       String[]  
+  privacy        PostPrivacy  @default(PUBLIC)  // PUBLIC, FRIENDS, ONLY_ME, CUSTOM (Enum)
+  allowed        String[]     @db.ObjectId      // used only when privacy = CUSTOM (list of allowed users)
+  blocked        String[]     @db.ObjectId      // used only when privacy = CUSTOM (list of blocked users)
+  // Relation to User model by (authorId: foreign key) 1:1
+  author         User         @relation(fields: [authorId], references: [id])
+  authorId       String       @db.ObjectId
+  // [Self-relation for shared posts (Forward)] A Relation to Post model itself by (originalPostId: foreign key) 1:1, in self-relations we must use NoAction (mongoDB only)
+  originalPost   Post?        @relation("SharedPosts", fields: [originalPostId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  originalPostId String?      @db.ObjectId
+  // Self-relation for shared posts (Reverse)
+  sharedPosts    Post[]       @relation("SharedPosts")
+  savedBy        SavedPost[]               // relation to SavedPost model (all users saved this post)
+  reactions      Reaction[]                // relation to Like model (all users reactions for the post)
+  comments       Comment[]                 // relation to Comment model (all comments for the post)
+  shares         Share[]                   // relation to shared posts model (all shares for the post)
+  tags           Tag[]                     // relation to Tag model (all tagged users for the post)  
+  editHistory    EditHistory[]             // relation to EditHistory model (edits history for the post)
+  notifications  Notification[]            // relation to Notification model (notifications for the post)    
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  // ✅ Performance counters to avoid expensive aggregations (avoid $count or .length queries on large arrays in MongoDB, instead we increment those counters)
+  reactionCount  Int @default(0)
+  commentCount   Int @default(0)
+  shareCount     Int @default(0)
+  // ✅ Indexes for fast array lookups & filtering (used For fields with type [array / array of objectIds]
+  @@index([allowed])
+  @@index([blocked])
+  @@index([hashtags])
+}
+
+//SavedPost model to store saved blog posts for a user (Bookmarks)
+model SavedPost {
+  id      String @id @default(auto()) @map("_id") @db.ObjectId
+  // Relation to User model by (userId: foreign key)
+  user    User   @relation(fields: [userId], references: [id])
+  userId  String @db.ObjectId
+  // Relation to Post model by (postId: foreign key)
+  post    Post   @relation(fields: [postId], references: [id])
+  postId  String @db.ObjectId
+  createdAt DateTime @default(now())
+  // avoid saving same post twice
+  @@unique([userId, postId])
+}
+
+//Comment model to store blog post comments information
+model Comment {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  content     String
+  // Relation to User model by (userId: foreign key)
+  user        User      @relation(fields: [userId], references: [id])
+  userId      String    @db.ObjectId
+  // Relation to Post model by (postId: foreign key)
+  post        Post      @relation(fields: [postId], references: [id])
+  postId      String    @db.ObjectId
+  // Self-Relation to Comment model itself by (parentId: foreign key) - [For nested comments/replies, in self-relations we must use NoAction (mongoDB only)]
+  parent      Comment?  @relation("CommentReplies", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  parentId    String?   @db.ObjectId                     
+  replies     Comment[] @relation("CommentReplies")    // self-relation to the replies to a comment (reverse side)
+  reactions   CommentReaction[]                        // relation to reactions on comment
+  tags        Tag[]                                    // relation to Tag model (all tagged users for a comment)
+  editHistory EditHistory[]                            // relation to EditHistory model (edits history for the comment)
+  notifications  Notification[]                        // relation to Notification model (notifications for the comment)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  // ✅ Performance counters to avoid expensive aggregations (avoid $count or .length queries on large arrays in MongoDB, instead we increment those counters)
+  reactionCount Int @default(0)
+  replyCount    Int @default(0)
+  // ✅ Indexes for fast array lookups & filtering (used For fields with type [array / array of objectIds]
+  @@index([parentId])
+}
+
+//Post reaction model to store post reactions information
+model Reaction {
+  id        String        @id @default(auto()) @map("_id") @db.ObjectId
+  // Relation to User model by (userId: foreign key)
+  user      User          @relation(fields: [userId], references: [id])
+  userId    String        @db.ObjectId
+  // Relation to Post model by (postId: foreign key)
+  post      Post          @relation(fields: [postId], references: [id])
+  postId    String        @db.ObjectId
+  type      ReactionType                     // ❤️ 😂 😮 😢 😡 👍 (Enum)
+  createdAt DateTime      @default(now())
+  // one reaction only per user per post
+  @@unique([userId, postId])                 
+}
+
+//Comment reaction model to store comments reactions  
+model CommentReaction {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  // Relation to User model by (userId: foreign key)
+  user      User     @relation(fields: [userId], references: [id])
+  userId    String   @db.ObjectId
+  // Relation to Comment model by (commentId: foreign key)
+  comment   Comment  @relation(fields: [commentId], references: [id])
+  commentId String   @db.ObjectId
+  type      ReactionType                // ❤️ 😂 😮 😢 😡 👍 (Enum)
+  createdAt DateTime @default(now())
+  // one reaction only per user per comment
+  @@unique([userId, commentId])  
+}
+
+//Share model to store share info of a shared post
+model Share {
+  id        String      @id @default(auto()) @map("_id") @db.ObjectId
+  // Relation to User model by (userId: foreign key)
+  user      User        @relation(fields: [userId], references: [id])
+  userId    String      @db.ObjectId
+  // Relation to Post model by (postId: foreign key)
+  post      Post        @relation(fields: [postId], references: [id])
+  postId    String      @db.ObjectId
+  notifications Notification[]             // relation to Notification model (notifications for the share)
+  message   String?                        // optional message when sharing
+  createdAt DateTime    @default(now())
+}
+
+//Friendship model to store friendship information
+model Friendship {
+  id          String           @id @default(auto()) @map("_id") @db.ObjectId
+  // Relation to User model by (requesterId: foreign key) - [User who sent the friend request]  
+  requester   User             @relation("requesterRelations", fields: [requesterId], references: [id])
+  requesterId String           @db.ObjectId
+  // Relation to User model by (receiverId: foreign key) - [User who received the friend request]
+  receiver    User             @relation("receiverRelations", fields: [receiverId], references: [id])
+  receiverId  String           @db.ObjectId
+  status      FriendshipStatus @default(PENDING)    // PENDING, ACCEPTED, DECLINED, BLOCKED (Enum)
+  notifications Notification[]                      // relation to Notification model (notifications for the friendship)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  // avoid sending same friend request twice
+  @@unique([requesterId, receiverId])
+}
+
+//Tag model to store (tagged users of a post or a comment or a message)
+model Tag {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  // Relation to Post model by (postId: foreign key)
+  post        Post?    @relation(fields: [postId], references: [id])
+  postId      String?  @db.ObjectId
+  // Relation to Comment model by (commentId: foreign key)
+  comment     Comment? @relation(fields: [commentId], references: [id])
+  commentId   String?  @db.ObjectId
+  // Relation to Message model by (messageId: foreign key) - [For tagging users in chat messages, to receive a notification]
+  message     Message? @relation(fields: [messageId], references: [id]) 
+  messageId   String?  @db.ObjectId
+  // Relation to User model by (taggedId: foreign key) - [who is a tagged user]
+  tagged      User     @relation("TaggedUser", fields: [taggedId], references: [id])
+  taggedId    String   @db.ObjectId
+  // Relation to User model by (taggedById: foreign key) - [who tagged that user]
+  taggedBy    User     @relation("TaggedByUser", fields: [taggedById], references: [id])
+  taggedById  String   @db.ObjectId
+  notifications Notification[]                 // relation to Notification model (notifications for a user tagged)
+  createdAt   DateTime @default(now())
+  // avoid tagging same user twice (Post/Comment/Message)
+  @@unique([postId, commentId, messageId, taggedId])
+}
+
+//EditHistory model to store edit history of a post or a comment or a message
+model EditHistory {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  // Relation to Post model by (postId: foreign key)
+  post        Post?    @relation(fields: [postId], references: [id])
+  postId      String?  @db.ObjectId
+  // Relation to Comment model by (commentId: foreign key)
+  comment     Comment? @relation(fields: [commentId], references: [id])
+  commentId   String?  @db.ObjectId
+  // Relation to Message model by (messageId: foreign key) - [For edit history of chat messages] 
+  message    Message?  @relation(fields: [messageId], references: [id])
+  messageId  String?   @db.ObjectId
+  // Relation to User model by (editorId: foreign key)
+  editor      User     @relation(fields: [editorId], references: [id])
+  editorId    String   @db.ObjectId
+  // oldContent and newContent are the content before and after the edit  
+  oldContent  String
+  newContent  String
+  editedAt    DateTime @default(now())
+}
+
+//Notification model to store notification information
+model Notification {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  type         NotificationType      // REACTION, COMMENT, REPLY, SHARE, TAG, FRIEND_REQUEST, FRIEND_REQUEST_ACCEPT (Enum)
+  reactionType ReactionType?         // null unless the notification is a (post/comment) reaction, then it will determine that reaction type (LIKE, LOVE,...)
+  // Relation to User model by (userId: foreign key) - [who is receiving the notification]
+  user        User     @relation(fields: [userId], references: [id])  
+  userId      String   @db.ObjectId
+  // Relation to User model by (senderId: foreign key) - [Who triggered the notification]
+  sender      User?    @relation("NotificationSender", fields: [senderId], references: [id])
+  senderId    String?  @db.ObjectId
+  // Relation to Post model by (postId: foreign key)
+  post    Post?    @relation(fields: [postId], references: [id])
+  postId  String?  @db.ObjectId
+  // Relation to Comment model by (commentId: foreign key)
+  comment   Comment? @relation(fields: [commentId], references: [id])
+  commentId String?  @db.ObjectId
+  // Relation to Share model by (shareId: foreign key)
+  share   Share?   @relation(fields: [shareId], references: [id])
+  shareId String?  @db.ObjectId
+  // Relation to Tag model by (tagId: foreign key)
+  tag     Tag?     @relation(fields: [tagId], references: [id])
+  tagId   String?  @db.ObjectId
+  // Relation to Friendship model by (requestId: foreign key)
+  request     Friendship? @relation(fields: [requestId], references: [id])
+  requestId   String?     @db.ObjectId  
+  isRead      Boolean  @default(false)       // true if notification is read, false otherwise
+  createdAt   DateTime @default(now()) 
+  // avoid sending same notification twice + performane optimization
+  @@index([userId, isRead, createdAt])
+  @@index([userId, createdAt])
+}
+
+
+
+// (Post/Comment Reaction options) enum 
+enum ReactionType {
+  LIKE
+  LOVE
+  HAHA
+  WOW
+  SAD
+  ANGRY
+}
+
+// (Post privacy) enum
+enum PostPrivacy {
+  PUBLIC
+  FRIENDS
+  ONLY_ME
+  CUSTOM
+}
+
+// (Friendship status) enum
+enum FriendshipStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  BLOCKED
+}
+
+// (Notification type) enum
+enum NotificationType {
+  REACTION
+  COMMENT
+  REPLY
+  SHARE
+  TAG
+  FRIEND_REQUEST
+  FRIEND_REQUEST_ACCEPT
+}
+
+
+
+
+/*********************** CHAT MODELS *********************/
+// Conversation model to store conversation information
+model Conversation {
+  id             String    @id @default(auto()) @map("_id") @db.ObjectId
+  isGroup        Boolean   @default(false)    // true if it's a group chat, false for one-on-one chat
+  name           String?                      // ? optional, used only for group chats
+  participants   ConversationParticipant[]    // relation to ConversationParticipant model
+  messages       Message[]                    // relation to Message model
+  calls          Call[]                       // relation to Call model (for call history in a conversation)
+  lastMessageAt  DateTime?                    // last message timestamp
+  createdAt      DateTime  @default(now())
+  @@index([lastMessageAt])
+}
+
+// ConversationParticipant model to store conversation participant information (Join table for Conversation & User models)
+model ConversationParticipant {
+  id             String       @id @default(auto()) @map("_id") @db.ObjectId
+  // Relation to User model by (userId: foreign key)
+  user           User         @relation(fields: [userId], references: [id])
+  userId         String       @db.ObjectId
+  // Relation to Conversation model by (conversationId: foreign key)
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+  conversationId String       @db.ObjectId
+  joinedAt       DateTime     @default(now())      // timestamp when the user joined the conversation
+  // avoid adding same user twice to the same conversation
+  @@unique([userId, conversationId])
+}
+
+// Message model to store message information
+model Message {
+  id              String       @id @default(auto()) @map("_id") @db.ObjectId
+  content         String?                // message content (text), optional because a message can be just an attachment without text
+  attachments     MessageAttachment[]    // relation to MessageAttachment model (for message attachments like images, files, etc..)
+  // Relation to Conversation model by (conversationId: foreign key)
+  conversation    Conversation @relation(fields: [conversationId], references: [id])
+  conversationId  String       @db.ObjectId
+  // Relation to User model by (senderId: foreign key) - [who sent the message]
+  sender          User         @relation("MessagesSent", fields: [senderId], references: [id])
+  senderId        String       @db.ObjectId
+  reactions       MessageReaction[]   // relation to MessageReaction model
+  reactionCount   Int @default(0)     // ✅ Performance counter to avoid expensive aggregations (avoid $count or .length queries on large arrays in MongoDB, instead we increment that counter)
+  reactionSummary Json? @db.Json      // pre-aggregated summary of reactions (e.g., { "LIKE": 10, "LOVE": 5, ... }) for fast retrieval without needing to fetch all reactions
+  reads           MessageRead[]       // relation to MessageRead model
+  tags            Tag[]               // relation to Tag model (for tagging users in messages)
+  editHistory     EditHistory[]       // relation to EditHistory model (for edits history of chat messages)
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt  
+  @@index([conversationId, createdAt])
+  @@index([senderId])
+}
+
+// MessageRead model to store which user read which message and when (for read receipts), important for group chats (who read which message and when)
+model MessageRead { 
+  id        String @id @default(auto()) @map("_id") @db.ObjectId 
+  // Relation to User model by (userId: foreign key)
+  user      User @relation(fields: [userId], references: [id]) 
+  userId    String @db.ObjectId 
+  // Relation to Message model by (messageId: foreign key)
+  message   Message @relation(fields: [messageId], references: [id]) 
+  messageId String @db.ObjectId 
+  readAt    DateTime @default(now())       // timestamp when the message was read
+  // avoid reading same message twice
+  @@unique([userId, messageId]) 
+  // Indexes for fast lookups (e.g., find all messages read by a user, or find all users who read a message)
+  @@index([messageId])
+  @@index([userId])
+}
+
+// MessageAttachment model to store message attachments information (like images, files, etc..)
+model MessageAttachment {
+  id        String @id @default(auto()) @map("_id") @db.ObjectId
+  url       String   // e.g., 'https://cloudinary.com/image.jpg'
+  publicId  String   // public ID from cloud storage (like Cloudinary) for easier management (deletion, transformations, etc..)
+  fileType  String   // e.g., 'image', 'video', 'application'
+  fileName  String   // e.g., 'image.jpg'
+  fileSize  Int      // file size in bytes
+  // Relation to Message model by (messageId: foreign key)
+  message   Message  @relation(fields: [messageId], references: [id])
+  messageId String   @db.ObjectId
+  createdAt DateTime @default(now())
+}  
+
+// MessageReaction model to store message reactions information (for messages in conversations)
+model MessageReaction {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  // Relation to User model by (userId: foreign key), Who reacted
+  user      User     @relation(fields: [userId], references: [id])
+  userId    String   @db.ObjectId
+  // Relation to Message model by (messageId: foreign key), Which message was reacted on
+  message   Message  @relation(fields: [messageId], references: [id])
+  messageId String   @db.ObjectId
+  type      ReactionType
+  createdAt DateTime @default(now())
+  // One reaction per user per message
+  @@unique([userId, messageId])
+  // Indexes for fast lookups (e.g., find all reactions by a user, or find all reactions for a message)
+  @@index([messageId])
+  @@index([userId])
+}
+
+
+
+// ------------ VIDEO/AUDIO CALL MODELS -------------
+model Call {
+  id              String   @id @default(auto()) @map("_id") @db.ObjectId
+  // Relation to Conversation model by (conversationId: foreign key) & User model by (callerId: foreign key)
+  conversation    Conversation @relation(fields: [conversationId], references: [id])
+  conversationId  String @db.ObjectId  
+  caller          User   @relation("StartedCalls", fields: [callerId], references: [id])
+  callerId        String @db.ObjectId
+  callType        CallType
+  startedAt       DateTime @default(now())
+  endedAt         DateTime?
+  participants    CallParticipant[]          // relation to CallParticipant model (users who participated in the call, their status, etc..)
+  @@index([conversationId])
+  @@index([callerId])
+}
+
+model CallParticipant {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  // Relation to Call model by (callId: foreign key) & User model by (userId: foreign key)
+  call       Call     @relation(fields: [callId], references: [id])
+  callId     String   @db.ObjectId
+  userId     String   @db.ObjectId
+  user       User     @relation(fields: [userId], references: [id])
+  status     CallParticipantStatus @default(RINGING) // RINGING, ACTIVE, REJECTED, MISSED
+  joinedAt   DateTime?
+  leftAt     DateTime?  // when they left the call (optional)
+  @@unique([callId, userId])
+  @@index([userId])
+  @@index([status])
+}
+
+enum CallParticipantStatus {
+  RINGING
+  ACTIVE
+  REJECTED
+  MISSED
+  LEFT
+  ENDED
+}
+
+enum CallType {
+  AUDIO
+  VIDEO
+}
+
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REPORT MODEL
+// Polymorphic — one table for posts, comments, and users.
+// Duplicate prevention handled by @@unique on (reporterId, targetType, targetId).
+// ─────────────────────────────────────────────────────────────────────────────
+model Report {
+  id           String       @id @default(auto()) @map("_id") @db.ObjectId
+  targetType   ReportTarget
+  targetId     String       @db.ObjectId
+  reason       ReportReason
+  description  String?      // optional user-written context, max 500 chars (validated in Zod)
+  status       ReportStatus @default(PENDING)
+  // Who reported
+  reporter     User         @relation("ReportsMade", fields: [reporterId], references: [id])
+  reporterId   String       @db.ObjectId
+  // Who reviewed (null until an admin acts)
+  reviewedBy     User?      @relation("ReportsReviewed", fields: [reviewedById], references: [id])
+  reviewedById   String?    @db.ObjectId
+  reviewedAt     DateTime?
+  resolutionNote String?    // admin's internal note
+  createdAt    DateTime     @default(now())
+  // One report per user per target
+  @@unique([reporterId, targetType, targetId])
+  // Queue sorting: filter by status, order by createdAt
+  @@index([status, createdAt])
+  // Reverse lookup: "all reports on this target"
+  @@index([targetType, targetId])
+  // User's own report history
+  @@index([reporterId, createdAt])
+}
+
+enum ReportTarget {
+  POST
+  COMMENT
+  USER
+}
+
+enum ReportReason {
+  SPAM
+  HARASSMENT
+  HATE_SPEECH
+  VIOLENCE
+  NUDITY
+  FALSE_INFO
+  COPYRIGHT
+  IMPERSONATION
+  OTHER
+}
+
+enum ReportStatus {
+  PENDING      // awaiting moderation
+  REVIEWED     // admin reviewed, no action taken
+  ACTIONED     // admin took action (content removed/hidden, user banned)
+  DISMISSED    // admin marked invalid/frivolous
+}
