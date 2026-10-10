@@ -1,7 +1,7 @@
 import { hashItem, compareHashed, hashToken, compareTokens } from '../utils/hash.js';
 import { createAccessToken, createRefreshToken, verifyRefreshToken } from '../utils/token.js';
 import { sendEmail } from '../utils/email.js';
-import { escapeHtml } from '../utils/sanitize.js';
+import { escapeHtml } from '../utils/XSS-sanitization.js';
 import { getIO } from '../socket/index.js';
 import { clearAuthCookies, createSession, setAuthCookies } from '../utils/sessionHelper.js';
 import crypto from 'crypto';
