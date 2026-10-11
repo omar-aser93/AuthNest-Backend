@@ -32,6 +32,12 @@ const app = express();                  // create express app
 app.set('trust proxy', 1);              // trust first proxy (Used for rate limiting fix - Behind Render/Railway/Nginx, every request appears to come from the proxy IP. Your rate limiters become globally shared)
 const httpServer = createServer(app);   // wrap express in http (used for socket.io)
 
+// Health check, Because we'll use Render to deploy our backend, this endpoint is useful for Render's health checks & to fix (free tier sleeps after 15 min idle) by pinging to this endpoint (using uptimerobot).
+// go to "https://dashboard.uptimerobot.com/sign-up" & enter the full health endpoint with render domain "https://authnest-backend-v0ty.onrender.com/health" & sign-up/log-in with google account, a check monitor will be created.
+// to add health checks to render itself, go to your render service -> "Settings" → scroll to Health Checks section → Edit → enter /health → Save Changes
+app.get("/health", (req, res) => res.json({ ok: true }));
+
+
 // Allow frontend & admin origins
 const allowedOrigins = [process.env.FRONTEND_ORIGIN || 'http://localhost:3000', process.env.ADMIN_ORIGIN || 'http://localhost:5174'].filter(Boolean);
 
@@ -69,11 +75,6 @@ app.use("/api/v1/edit-history", editHistoryRoutes);
 app.use('/api/v1/reports', reportRoutes);
 app.use("/api/v1/chat", chatRoutes);
 app.use("/api/v1/admin", adminRoutes);
-
-// Health check, Because we'll use Render to deploy our backend, this endpoint is useful for Render's health checks & to fix (free tier sleeps after 15 min idle) by pinging to this endpoint (using uptimerobot).
-// go to "https://dashboard.uptimerobot.com/sign-up" & enter the full health endpoint with render domain "https://authnest-backend-v0ty.onrender.com/health" & sign-up/log-in with google account, a check monitor will be created.
-// to add health checks to render itself, go to your render service -> "Settings" → scroll to Health Checks section → Edit → enter /health → Save Changes
-app.get("/health", (req, res) => res.json({ ok: true }));
 
 
 // Global server error handler used with all controllers (for uncaught exceptions & unhandled rejections)
