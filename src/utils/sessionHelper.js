@@ -34,7 +34,7 @@ export async function createSession({ userId, role, remember = false, req }) {
 // adminLogin ignores the return; the cookie is enough for the admin SPA.
 export function setAuthCookies(res, { accessToken, refreshToken, refreshExpiryDays }) {
   const isProd = process.env.NODE_ENV === 'production';
-  const cookieOptions = { httpOnly: true, secure: isProd, sameSite: isProd ? 'none' : 'lax', path: '/' };
+  const cookieOptions = { httpOnly: true, secure: isProd, sameSite: 'lax', path: '/' };
   res.cookie('accessToken', accessToken, { ...cookieOptions, maxAge: 15 * 60 * 1000 });
   res.cookie('refreshToken', refreshToken, { ...cookieOptions, maxAge: refreshExpiryDays * 24 * 60 * 60 * 1000 });
   const csrfToken = crypto.randomBytes(32).toString('hex');
@@ -46,7 +46,7 @@ export function setAuthCookies(res, { accessToken, refreshToken, refreshExpiryDa
 // Clears all auth cookies - Cookie options must match what res.cookie used, or the browser silently ignores the deletion.
 export function clearAuthCookies(res) {
   const isProd = process.env.NODE_ENV === 'production';
-  const cookieOptions = { path: '/', secure: isProd, sameSite: isProd ? 'none' : 'lax' };
+  const cookieOptions = { path: '/', secure: isProd, sameSite: 'lax' };
   res.clearCookie('accessToken', cookieOptions);
   res.clearCookie('refreshToken', cookieOptions);
   res.clearCookie('csrfToken', { ...cookieOptions, httpOnly: false });

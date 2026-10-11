@@ -70,7 +70,7 @@ app.use('/api/v1/reports', reportRoutes);
 app.use("/api/v1/chat", chatRoutes);
 app.use("/api/v1/admin", adminRoutes);
 
-// Health check, Because we'll use Render to deploy our backend, this endpoint is useful for Render's health checks & to fix (free tier sleeps after 15 min idle) by pinging to this endpoint.
+// Health check, Because we'll use Render to deploy our backend, this endpoint is useful for Render's health checks & to fix (free tier sleeps after 15 min idle) by pinging to this endpoint (using uptimerobot).
 // go to "https://dashboard.uptimerobot.com/sign-up" & enter the full health endpoint with render domain "https://authnest-backend-v0ty.onrender.com/health" & sign-up/log-in with google account, a check monitor will be created.
 // to add health checks to render itself, go to your render service -> "Settings" → scroll to Health Checks section → Edit → enter /health → Save Changes
 app.get("/health", (req, res) => res.json({ ok: true }));

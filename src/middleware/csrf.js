@@ -10,7 +10,7 @@ export function getCsrfToken(req, res) {
     res.cookie("csrfToken", token, {
       httpOnly: false,                         // must be JS-readable (browser)
       secure: isProd,
-      sameSite: isProd ? "none" : "lax",
+      sameSite: "lax",
       path: "/",
       maxAge: 30 * 24 * 60 * 60 * 1000,        // 30 days to match refresh token (longest boundary)
     });
