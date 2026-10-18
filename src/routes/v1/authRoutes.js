@@ -2,7 +2,7 @@ import express from 'express';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { validate } from '../../middleware/validate.js';
 import { signupSchema, loginSchema, forgotPasswordSchema, resetPasswordSchema, otpSchema } from '../../utils/validator.js';
-import { signup, login, logout, refreshToken, verifyEmail, resendVerification, forgotPassword, verifyOtp, resetPassword, googleOAuth, githubOAuth, confirmLinkAccount } from '../../controllers/authController.js';
+import { signup, login, logout, refreshToken, verifyEmail, resendVerification, forgotPassword, verifyOtp, resetPassword, googleOAuth, googleMobileOAuth, githubOAuth, githubMobileOAuth, confirmLinkAccount } from '../../controllers/authController.js';
 import auth from '../../middleware/auth.js';
 import { getCsrfToken } from "../../middleware/csrf.js";
 
@@ -28,6 +28,8 @@ router.post("/reset-password", authLimiter, validate(resetPasswordSchema), reset
 router.post("/oauth/google", authLimiter, googleOAuth);      // Google OAuth route with rate limiting
 router.post("/oauth/github", authLimiter, githubOAuth);      // GitHub OAuth route with rate limiting
 router.get("/link-account", confirmLinkAccount);             // Link user account with his OAuth route
+router.post("/oauth/google/mobile", authLimiter, googleMobileOAuth);  // Google-mobile OAuth route with rate limiting
+router.post("/oauth/github/mobile", authLimiter, githubMobileOAuth);  // GitHub-mobile OAuth route with rate limiting
 
 router.get("/csrf-token", getCsrfToken);                     // Route to issue CSRF token cookie (protection against CSRF attacks)
 

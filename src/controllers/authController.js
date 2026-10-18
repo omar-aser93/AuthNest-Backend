@@ -536,3 +536,168 @@ export async function confirmLinkAccount(req, res, next) {
 
   } catch (err) { next(err); }            // catch errors and pass to error handler
 }
+
+
+
+// ---------------- GOOGLE OAUTH CONTROLLER (MOBILE — ID token) ----------------
+// The native SDK signs the user in and returns an ID token directly. 
+// It can't use the authorization-code flow from googleOAuth() in web controller above, 
+// because the native app has different client IDs and redirect URIs. We verify the ID token here, then run the same create / ban / merge / session logic.
+export async function googleMobileOAuth(req, res, next) {
+  try {
+    // Get idToken from req.body, if no idToken return 400 "idToken is required"
+    const { idToken } = req.body;
+    if (!idToken) return res.status(400).json({ message: "idToken is required" });
+
+    // Verify signature, exp, iss, and aud. The native SDK mints the token with the WEB client ID on every platform, so GOOGLE.clientId is the correct audience.
+    const client = new OAuth2Client({ clientId: GOOGLE.clientId });
+    let payload;
+    try {
+      const ticket = await client.verifyIdToken({ idToken, audience: GOOGLE.clientId });
+      payload = ticket.getPayload();
+    } catch {
+      return res.status(401).json({ message: "Invalid Google token" });
+    }
+
+    // Extract email, email_verified, name, picture from payload
+    const { email: rawEmail, email_verified, name, picture, sub } = payload;
+    const email = rawEmail?.trim().toLowerCase();
+    if (!email) return res.status(400).json({ message: "Google account has no email" });
+    if (!email_verified) return res.status(403).json({ message: "Email not verified" });
+
+    // Check the user by email, if not found, create a new user
+    let user = await prisma.user.findUnique({ where: { email } });
+    if (!user) {
+      user = await prisma.user.create({
+        data: { email, name, image: picture, password: null, googleId: sub, isEmailVerified: true },
+      });
+    }
+    if (user.bannedAt) return res.status(403).json({ message: "Your account has been suspended" });
+
+    // Existing password account with the same email → merge flow (same as web).
+    if (user.password && !user.googleId) {
+      const mergeToken = crypto.randomUUID();
+      const hashedMergeToken = await hashItem(mergeToken);
+      await prisma.user.update({
+        where: { email },
+        data: {
+          mergeToken: hashedMergeToken,
+          mergeTokenExpiry: new Date(Date.now() + 1000 * 60 * 15),
+          pendingGoogleId: sub,
+        },
+      });
+
+      try {
+        await sendEmail({
+          to: email,
+          subject: "Link your Google account",
+          html: `
+            <p>Someone tried to sign in with Google using this email.</p>
+            <p>If this was you, click below to link your Google account:</p>
+            <a href="${process.env.BACKEND_ORIGIN}/api/v1/auth/link-account?token=${mergeToken}&email=${encodeURIComponent(email)}"> Link Google Account </a>
+            <p>Expires in 15 minutes. If this wasn't you, ignore this email.</p>
+          `,
+        });
+      } catch (err) { console.log("Sending email failed:", err); }
+
+      // 202 → the app shows "check your email, then tap Google again".
+      // The link merges the account server-side; the app doesn't need to do anything else.
+      return res.status(202).json({ message: "A verification email has been sent to link your Google account." });
+    }
+
+    // Unlike web, Mobile sessions are long-lived — mirrors mobile login's remember: true (30 days) by default.
+    const { accessToken, refreshToken } = await createSession({ userId: user.id, role: user.role, remember: true, req });
+
+    // Respond with back the user, accessToken, and refreshToken
+    return res.json({
+      user: { id: user.id, email, name: user.name ?? name, image: user.image ?? picture },
+      accessToken,
+      refreshToken,
+    });
+  } catch (err) { next(err); }             // catch errors and pass to error handler
+} 
+
+
+
+// ---------------- GITHUB OAUTH CONTROLLER (MOBILE — authorization code) ----------------
+// GitHub provides an authorization code, not an ID token. The app sends the code, and the backend exchanges it using the client secret and the mobile redirect URI.
+export async function githubMobileOAuth(req, res, next) {
+  try {
+    // Get code from req.body, if no code return 400 "code is required"
+    const { code } = req.body;
+    if (!code) return res.status(400).json({ message: "code is required" });
+
+    // Exchange the code using the MOBILE redirect URI
+    const tokenRes = await fetch("https://github.com/login/oauth/access_token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({
+        code,
+        client_id: GITHUB.clientId,
+        client_secret: GITHUB.clientSecret,
+        redirect_uri: process.env.GITHUB_MOBILE_REDIRECT_URI, 
+      }),
+    });
+
+    // Check if access_token is ok, if not return 400 "Failed to get GitHub access token"
+    const tokenData = await tokenRes.json();
+    if (!tokenData.access_token) {
+      return res.status(400).json({ message: "Failed to get GitHub access token" });
+    }
+
+    // Fetch profile and verified primary email
+    const profileRes = await fetch("https://api.github.com/user", {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` },
+    });
+    if (!profileRes.ok) return res.status(400).json({ message: "Failed to fetch GitHub profile" });
+    const profile = await profileRes.json();
+
+    const emailsRes = await fetch("https://api.github.com/user/emails", {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` },
+    });
+    const emails = await emailsRes.json();
+    if (!Array.isArray(emails)) return res.status(400).json({ message: "Failed to fetch GitHub emails" });
+    const primary = emails.find((e) => e.primary && e.verified);
+    if (!primary) return res.status(403).json({ message: "No verified email found" });
+    const email = primary.email.trim().toLowerCase();
+
+    // Same create / ban / merge / session logic as the web controller
+    let user = await prisma.user.findUnique({ where: { email } });
+    if (!user) {
+      user = await prisma.user.create({
+        data: { email, name: profile.name || profile.login, image: profile.avatar_url, password: null, githubId: String(profile.id), isEmailVerified: true },
+      });
+    }
+    if (user.bannedAt) return res.status(403).json({ message: "Your account has been suspended" });
+
+    if (user.password && !user.githubId) {
+      // Same merge flow as Google mobile — send magic link email
+      const mergeToken = crypto.randomUUID();
+      const hashedMergeToken = await hashItem(mergeToken);
+      await prisma.user.update({
+        where: { email },
+        data: { mergeToken: hashedMergeToken, mergeTokenExpiry: new Date(Date.now() + 1000 * 60 * 15), pendingGithubId: String(profile.id) },
+      });
+      try {
+        await sendEmail({
+          to: email,
+          subject: "Link your GitHub account",
+          html: `<p>Someone tried to sign in with GitHub using this email.</p>
+                 <p>If this was you, click below to link your GitHub account:</p>
+                 <a href="${process.env.BACKEND_ORIGIN}/api/v1/auth/link-account?token=${mergeToken}&email=${encodeURIComponent(email)}"> Link GitHub Account </a>
+                 <p>Expires in 15 minutes.</p>`,
+        });
+      } catch (err) { console.log("Sending email failed:", err); }
+      return res.status(202).json({ message: "A verification email has been sent to link your GitHub account." });
+    }
+    
+    // Unlike web, Mobile sessions are long-lived — mirrors mobile login's remember: true (30 days) by default.
+    const { accessToken, refreshToken } = await createSession({ userId: user.id, role: user.role, remember: true, req });
+    // Respond with the user, accessToken, refreshToken
+    return res.json({
+      user: { id: user.id, email, name: user.name ?? profile.name, image: user.image ?? profile.avatar_url },
+      accessToken,
+      refreshToken,
+    });
+  } catch (err) { next(err); }        // catch errors and pass to error handler
+}
