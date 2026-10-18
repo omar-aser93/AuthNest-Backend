@@ -619,15 +619,21 @@ export async function googleMobileOAuth(req, res, next) {
 
 
 
-// ---------------- GITHUB OAUTH CONTROLLER (MOBILE — authorization code) ----------------
-// GitHub provides an authorization code, not an ID token. The app sends the code, and the backend exchanges it using the client secret and the mobile redirect URI.
+// ---------------- GITHUB OAUTH CONTROLLER (MOBILE — authorization code + PKCE) ----------------
+// GitHub provides an authorization code, not an ID token. expo-auth-session sends a PKCE
+// code_challenge by default, so GitHub REQUIRES code_verifier in the token exchange.
 export async function githubMobileOAuth(req, res, next) {
   try {
-    // Get code from req.body, if no code return 400 "code is required"
-    const { code } = req.body;
-    if (!code) return res.status(400).json({ message: "code is required" });
+    // Get code and codeVerifier from req.body, if no code or codeVerifier return 400
+    const { code, codeVerifier } = req.body;
+    if (!code || typeof code !== 'string') {
+      return res.status(400).json({ message: "code is required" });
+    }
+    if (!codeVerifier || typeof codeVerifier !== 'string') {
+      return res.status(400).json({ message: "codeVerifier is required" });
+    }
 
-    // Exchange the code using the MOBILE redirect URI
+    // Exchange the code using the MOBILE redirect URI + PKCE verifier
     const tokenRes = await fetch("https://github.com/login/oauth/access_token", {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
@@ -635,11 +641,11 @@ export async function githubMobileOAuth(req, res, next) {
         code,
         client_id: GITHUB.clientId,
         client_secret: GITHUB.clientSecret,
-        redirect_uri: process.env.GITHUB_MOBILE_REDIRECT_URI, 
+        redirect_uri: process.env.GITHUB_MOBILE_REDIRECT_URI,
+        code_verifier: codeVerifier,
       }),
     });
 
-    // Check if access_token is ok, if not return 400 "Failed to get GitHub access token"
     const tokenData = await tokenRes.json();
     if (!tokenData.access_token) {
       return res.status(400).json({ message: "Failed to get GitHub access token" });
@@ -661,43 +667,56 @@ export async function githubMobileOAuth(req, res, next) {
     if (!primary) return res.status(403).json({ message: "No verified email found" });
     const email = primary.email.trim().toLowerCase();
 
-    // Same create / ban / merge / session logic as the web controller
+    // Same create / ban / merge / session logic as web
     let user = await prisma.user.findUnique({ where: { email } });
     if (!user) {
       user = await prisma.user.create({
-        data: { email, name: profile.name || profile.login, image: profile.avatar_url, password: null, githubId: String(profile.id), isEmailVerified: true },
+        data: {
+          email,
+          name: profile.name || profile.login,
+          image: profile.avatar_url,
+          password: null,
+          githubId: String(profile.id),
+          isEmailVerified: true,
+        },
       });
     }
     if (user.bannedAt) return res.status(403).json({ message: "Your account has been suspended" });
 
     if (user.password && !user.githubId) {
-      // Same merge flow as Google mobile — send magic link email
       const mergeToken = crypto.randomUUID();
       const hashedMergeToken = await hashItem(mergeToken);
       await prisma.user.update({
         where: { email },
-        data: { mergeToken: hashedMergeToken, mergeTokenExpiry: new Date(Date.now() + 1000 * 60 * 15), pendingGithubId: String(profile.id) },
+        data: {
+          mergeToken: hashedMergeToken,
+          mergeTokenExpiry: new Date(Date.now() + 1000 * 60 * 15),
+          pendingGithubId: String(profile.id),
+        },
       });
       try {
         await sendEmail({
           to: email,
           subject: "Link your GitHub account",
-          html: `<p>Someone tried to sign in with GitHub using this email.</p>
-                 <p>If this was you, click below to link your GitHub account:</p>
-                 <a href="${process.env.BACKEND_ORIGIN}/api/v1/auth/link-account?token=${mergeToken}&email=${encodeURIComponent(email)}"> Link GitHub Account </a>
-                 <p>Expires in 15 minutes.</p>`,
+          html: `
+            <p>Someone tried to sign in with GitHub using this email.</p>
+            <p>If this was you, click below to link your GitHub account:</p>
+            <a href="${process.env.BACKEND_ORIGIN}/api/v1/auth/link-account?token=${mergeToken}&email=${encodeURIComponent(email)}"> Link GitHub Account </a>
+            <p>Expires in 15 minutes.</p>
+          `,
         });
       } catch (err) { console.log("Sending email failed:", err); }
       return res.status(202).json({ message: "A verification email has been sent to link your GitHub account." });
     }
-    
+
     // Unlike web, Mobile sessions are long-lived — mirrors mobile login's remember: true (30 days) by default.
-    const { accessToken, refreshToken } = await createSession({ userId: user.id, role: user.role, remember: true, req });
-    // Respond with the user, accessToken, refreshToken
+    const { accessToken, refreshToken } = await createSession({ userId: user.id, role: user.role, remember: true, req, });
+    
+    // Respond with user info, the tokens
     return res.json({
       user: { id: user.id, email, name: user.name ?? profile.name, image: user.image ?? profile.avatar_url },
       accessToken,
       refreshToken,
     });
-  } catch (err) { next(err); }        // catch errors and pass to error handler
+  } catch (err) { next(err); }    // catch errors and pass to error handler
 }
