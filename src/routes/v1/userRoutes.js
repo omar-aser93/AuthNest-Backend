@@ -5,12 +5,13 @@ import { csrfProtection } from "../../middleware/csrf.js";
 import { validate } from '../../middleware/validate.js';
 import { changePasswordSchema } from '../../utils/validator.js';
 import { upload } from "../../middleware/upload.js";
-import { getMyProfile, getUserById, updateUser, changePassword, deleteUser, searchUsersForMention, searchUsers } from '../../controllers/userController.js';
+import { getMyProfile, getMyStats, getUserById, updateUser, changePassword, deleteUser, searchUsersForMention, searchUsers } from '../../controllers/userController.js';
 
 const router = express.Router();                 // Create router instance
 
 
 router.get('/me', auth, getMyProfile);                   // get my profile (protected)
+router.get('/me/stats', auth, getMyStats);               // get my stats (protected)
 router.get('/search', auth, searchUsersForMention);      // search users for mention (protected)
 router.get('/search-users', optionalAuth, searchUsers);  // search users (public, optional auth for personalized results if logged in)
 router.get('/:id', getUserById);                         // get user by id (public)

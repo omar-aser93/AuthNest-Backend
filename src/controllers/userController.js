@@ -7,7 +7,7 @@ import { deleteCommentsCascade, deletePostsCascade, deleteMessagesCascade, delet
 import { sanitizeText } from '../utils/XSS-sanitization.js';
 
 
-// ----------------  USER PROFILE CONTROLLER ----------------
+// ---------------- CURRENT USER PROFILE CONTROLLER ----------------
 export async function getMyProfile(req, res, next) {
   try {
     // find user by id from req.user (set in auth middleware by decoding the token)
@@ -23,7 +23,24 @@ export async function getMyProfile(req, res, next) {
 
 
 
-// ---------------- GET USER BY ID CONTROLLER ----------------
+// ---------------- GET MY STATS CONTROLLER ----------------
+export async function getMyStats(req, res, next) {
+  try {
+    const userId = req.user.id;             // get user id from req.user (token payload)
+    // count posts, saved posts and friends
+    const [postsCount, savedPostsCount, friendsCount] = await Promise.all([
+      prisma.post.count({ where: { authorId: userId } }),
+      prisma.savedPost.count({ where: { userId } }),
+      prisma.friendship.count({ where: { status: 'ACCEPTED', OR: [{ requesterId: userId }, { receiverId: userId }] } }),
+    ]);
+    // respond with the stats
+    res.json({ postsCount, savedPostsCount, friendsCount });
+  } catch (err) { next(err); }          // catch errors and pass to error handler
+}
+
+
+
+// ---------------- GET A USER BY ID CONTROLLER ----------------
 export async function getUserById(req, res, next) {
   try {
     // find user by id from req.params.id
