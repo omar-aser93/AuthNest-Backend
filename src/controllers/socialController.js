@@ -19,26 +19,35 @@ export async function sendFriendRequest(req, res, next) {
     // Check if request already exists in any direction
     const existingFriendship = await prisma.friendship.findFirst({ where: { OR: [ { requesterId, receiverId }, { requesterId: receiverId, receiverId: requesterId } ] }});
 
-    // If request already exists, return with a message based on the status
-    if (existingFriendship) {
-      const status = existingFriendship.status;         // Get existing friendship status
-      let message = "Friend request already exists";    // variable to hold a message
-      
+    // ── DECLINED: clean the stale row & fall through to create a fresh PENDING ── A declined request must NOT be a permanent dead-end. Either party should be
+    if (existingFriendship?.status === 'DECLINED') {
+      await prisma.notification.deleteMany({ where: { requestId: existingFriendship.id } });
+      await prisma.friendship.deleteMany({ where: { id: existingFriendship.id } });
+    }
+    // ── Any OTHER existing relationship → return the appropriate error ──
+    else if (existingFriendship) {
+      const status = existingFriendship.status;       // Get existing friendship status
+      let message = "Friend request already exists";  // variable to hold a message
       // if status is ACCEPTED, message is "You are already friends"
       if (status === 'ACCEPTED') {
         message = "You are already friends";
-      } else if (status === 'PENDING') {
-        // if status is PENDING, check which user (sender/receiver) sent the request, then return a different message
+      }
+      // if status is PENDING, check which user (sender/receiver) sent the request
+      else if (status === 'PENDING') {
         if (existingFriendship.requesterId === requesterId) {
           message = "Friend request already sent";
         } else {
           message = "You have a pending request from this user";
         }
-      } else if (status === 'BLOCKED') {
-        message = "This friendship is blocked";       // if status is BLOCKED, message is "This friendship is blocked"
       }
-
-      return res.status(400).json({ message, status });     // Return with the message and the status
+      // if status is BLOCKED, distinguish who placed the block (privacy-preserving)
+      else if (status === 'BLOCKED') {
+        message = existingFriendship.requesterId === requesterId
+          ? "You blocked this user. Unblock them to send a request."
+          : "Unable to send friend request";       // don't reveal "they blocked you"
+      }
+      // Return with the message and the status (BLOCKED response omits the status field so the client can't infer who blocked whom from the payload)
+      return res.status(400).json(status === 'BLOCKED' ? { message } : { message, status });
     }
 
     // Create friend request in both directions in the db
@@ -66,11 +75,12 @@ export async function acceptFriendRequest(req, res, next) {
     const { requestId } = req.params;                 // Get friend request id from URL params "/:requestId"
     const userId = req.user.id;                       // Get current user id, from req.user (token payload)
 
-    // Find and update friendship from 'PENDING' to 'ACCEPTED'
-    const friendship = await prisma.friendship.update({
-      where: { id: requestId, receiverId: userId, status: 'PENDING' },
-      data: { status: 'ACCEPTED' },
-      include: { requester: { select: { id: true, name: true, image: true } }, receiver: { select: { id: true, name: true, image: true } } }
+    // Find and Update friendship status from 'PENDING' to 'ACCEPTED'
+    const { count } = await prisma.friendship.updateMany({ where: { id: requestId, receiverId: userId, status: 'PENDING' }, data: { status: 'ACCEPTED' }, });
+    if (count === 0) return res.status(404).json({ message: "Friend request not found or already processed" });
+    const friendship = await prisma.friendship.findUnique({
+      where: { id: requestId },
+      include: { requester: { select: { id: true, name: true, image: true } }, receiver: { select: { id: true, name: true, image: true } } },
     });
 
     // If friendship is not found, return with a message
@@ -96,8 +106,13 @@ export async function declineFriendRequest(req, res, next) {
     const userId = req.user.id;                      // Get current user id, from req.user (token payload)
 
     // Find and Update friendship status from 'PENDING' to 'DECLINED'
-    const friendship = await prisma.friendship.update({ where: { id: requestId, receiverId: userId, status: 'PENDING' }, data: { status: 'DECLINED' } });
-
+    const { count } = await prisma.friendship.updateMany({
+      where: { id: requestId, receiverId: userId, status: 'PENDING' },
+      data: { status: 'DECLINED' },
+    });
+    if (count === 0) return res.status(404).json({ message: "Friend request not found" });
+    const friendship = await prisma.friendship.findUnique({ where: { id: requestId } });
+  
     // If friendship is not found, return with a message
     if (!friendship) { return res.status(404).json({ message: "Friend request not found" }); }
 
@@ -118,11 +133,13 @@ export async function cancelFriendRequest(req, res, next) {
     const { requestId } = req.params;                 // Get friend request id from URL params "/:requestId" 
     const userId = req.user.id;                       // Get current user id, from req.user (token payload)
 
-    // Delete pending friendship (only if requester is cancelling)
-    const friendship = await prisma.friendship.delete({ where: { id: requestId, requesterId: userId, status: 'PENDING' } });
-    
-    // If friendship is not found, return with a message
-    if (!friendship) { return res.status(404).json({ message: "Friend request not found" }); }
+    // get the friendship, if does not exist, return with a message
+    const friendship = await prisma.friendship.findFirst({ where: { id: requestId, requesterId: userId, status: 'PENDING' } });
+    if (!friendship) return res.status(404).json({ message: "Friend request not found" });
+
+    // Delete notifications and pending friendship
+    await prisma.notification.deleteMany({ where: { requestId } });
+    await prisma.friendship.deleteMany({ where: { id: requestId, status: 'PENDING' } });
 
     // invalidate friend caches for both users 
     invalidateFriendCache(userId);
@@ -175,18 +192,27 @@ export async function blockUser(req, res, next) {
     const targetUser = await prisma.user.findUnique({ where: { id: targetId } });
     if (!targetUser) return res.status(404).json({ message: "User not found" });
 
-    // Find existing friendship in any direction (sent or received)
-    const existing = await prisma.friendship.findFirst({
-      where: { OR: [{ requesterId: currentUserId, receiverId: targetId }, { requesterId: targetId, receiverId: currentUserId }] }
-    });
+    // Find existing BLOCKED friendship in either direction
+    const pair = [{ requesterId: currentUserId, receiverId: targetId }, { requesterId: targetId, receiverId: currentUserId }];
 
-    // If there is an existing friendship, update it to BLOCKED, otherwise create a new BLOCKED friendship
-    let friendship;
-    if (existing) {      
-      friendship = await prisma.friendship.update({ where: { id: existing.id }, data: { status: 'BLOCKED' } });
-    } else {      
-      friendship = await prisma.friendship.create({ data: { requesterId: currentUserId, receiverId: targetId, status: 'BLOCKED' } });
+    // Remove any non-block relationship (pending / accepted / declined) in either direction. (except BLOCKED)
+    const stale = await prisma.friendship.findMany({ where: { status: { not: 'BLOCKED' }, OR: pair }, select: { id: true } });
+    if (stale.length) {
+      const ids = stale.map((f) => f.id);
+      await prisma.notification.deleteMany({ where: { requestId: { in: ids } } });
+      await prisma.friendship.deleteMany({ where: { id: { in: ids } } });
     }
+
+    // Create MY block (requesterId = blocker). Idempotent.
+    let friendship = await prisma.friendship.findFirst({ where: { requesterId: currentUserId, receiverId: targetId, status: 'BLOCKED' } });
+    if (!friendship) {
+      try {
+        friendship = await prisma.friendship.create({ data: { requesterId: currentUserId, receiverId: targetId, status: 'BLOCKED' } });
+      } catch (e) {
+        if (e.code !== 'P2002') throw e;   // someone else created it first: fine
+        friendship = await prisma.friendship.findFirst({ where: { requesterId: currentUserId, receiverId: targetId, status: 'BLOCKED' } });
+      }
+    } 
 
     // Invalidate caches for both users
     invalidateFriendCache(currentUserId);
@@ -209,16 +235,11 @@ export async function unblockUser(req, res, next) {
     // if target user id is same as current user id, return with a message "Cannot unblock yourself"
     if (targetId === currentUserId) { return res.status(400).json({ message: "Cannot unblock yourself" }) }
 
-    // Find the BLOCKED friendship
-    const friendship = await prisma.friendship.findFirst({
-      where: { status: 'BLOCKED', OR: [{ requesterId: currentUserId, receiverId: targetId }, { requesterId: targetId, receiverId: currentUserId }] }
+    // Only the BLOCKER (requesterId) can remove the block, if no BLOCKED friendship is found, return with a message
+    const { count } = await prisma.friendship.deleteMany({
+      where: { status: 'BLOCKED', requesterId: currentUserId, receiverId: targetId },
     });
-
-    // If friendship is not found, return with a message
-    if (!friendship) { return res.status(404).json({ message: "Block not found" }) }
-
-    // Delete the friendship record (unblock = remove "BLOCKED" friendship)
-    await prisma.friendship.delete({ where: { id: friendship.id } });
+    if (count === 0) return res.status(404).json({ message: "Block not found" });
 
     // Invalidate caches for both users
     invalidateBlockedCache(currentUserId);
@@ -244,7 +265,10 @@ export async function getMyFriends(req, res, next) {
       skip: cursor ? 1 : 0,                             // skip the extra friendship if there is a cursor
       cursor: cursor ? { id: cursor } : undefined,      // set the cursor indicator
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], // order by creation date (descending) + id (to ensure consistent order when createdAt is the same)
-      where: { status: "ACCEPTED", OR: [{ requesterId: userId }, { receiverId: userId }], ...(q && { AND: [{ OR: [{ requester: { name: { contains: q, mode: "insensitive" } } }, { receiver: { name: { contains: q, mode: "insensitive" } } } ]} ] }) },
+      where: { status: "ACCEPTED", OR: [{ requesterId: userId }, { receiverId: userId }], ...(q && { AND: [{ OR: [
+        { requesterId: userId, receiver:  { name: { contains: q, mode: 'insensitive' } } },
+        { receiverId: userId,  requester: { name: { contains: q, mode: 'insensitive' } } },
+      ] }] }) },
       include: { requester: { select: { id: true, name: true, image: true, bio: true }}, receiver: { select: { id: true, name: true, image: true, bio: true }} },
     });
 
@@ -268,9 +292,10 @@ export async function getMyFriends(req, res, next) {
 export async function getFriendRequests(req, res, next) {
   try {
     const userId = req.user.id;                     // Get current user id, from req.user (token payload)
-    const type = req.query.type || 'received';      // 'received', 'sent', or 'all'
     const limit = parseInt(req.query.limit) || 20;  // get limit from URL query OR default to 20
     const cursor = req.query.cursor;                // get cursor from URL query (for infinite scroll)
+    // get type from URL query (received, sent, all), default to "received"
+    const type = ['received', 'sent', 'all'].includes(req.query.type) ? req.query.type : 'received';
 
     // Build where clause filters based on type
     let where = { status: 'PENDING' };    
@@ -308,26 +333,29 @@ export async function getFriendSuggestions(req, res, next) {
     const userId = req.user.id;                         // Get current user id, from req.user (token payload)
     const limit = parseInt(req.query.limit) || 10;      // get limit from URL query OR default to 10
 
-    // Get accepted friendships where user is either requester or receiver
-    const userFriendships = await prisma.friendship.findMany({
-      where: { status: 'ACCEPTED', OR: [ { requesterId: userId }, { receiverId: userId } ]},
-      select: { requesterId: true, receiverId: true }
+    // Get all friendships where user is either requester or receiver
+    const related = await prisma.friendship.findMany({
+      where: { OR: [{ requesterId: userId }, { receiverId: userId }] },
+      select: { requesterId: true, receiverId: true, status: true },
     });
-
+    
+    const other = (f) => (f.requesterId === userId ? f.receiverId : f.requesterId);
     // Extract the IDs
-    const friendIds = userFriendships.map(f => f.requesterId === userId ? f.receiverId : f.requesterId );
+    const friendIds = related.filter((f) => f.status === 'ACCEPTED').map(other);
     // Add current user ID & his current friends IDs to exclude list
-    const excludeIds = [...friendIds, userId];
+    const excludeIds = [userId, ...new Set(related.map(other))];
 
     // Get friends of friends (mutual connections) & append the exclude list
     const mutualConnections = await prisma.friendship.findMany({
       where: {
         status: 'ACCEPTED',
-        OR: [ { requesterId: { in: friendIds } }, { receiverId: { in: friendIds } } ],
-        NOT: { OR: [{ requesterId: { in: excludeIds } }, { receiverId: { in: excludeIds } }] }
+        OR: [
+          { requesterId: { in: friendIds }, receiverId: { notIn: excludeIds } },
+          { receiverId: { in: friendIds }, requesterId: { notIn: excludeIds } },
+        ],
       },
       select: { requesterId: true, receiverId: true },
-      take: 100       // Limit for performance
+      take: 100,
     });
 
     // Build candidate set, excluding already excluded IDs 
@@ -387,18 +415,12 @@ export async function getBlockedUsers(req, res, next) {
       skip: cursor ? 1 : 0,                             // skip the extra record if there is a cursor
       cursor: cursor ? { id: cursor } : undefined,      // set the cursor indicator
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], // order by creation date (descending) + id (to ensure consistent order when createdAt is the same)
-      where: { status: 'BLOCKED', OR: [{ requesterId: userId }, { receiverId: userId }] },
-      include: {
-        requester: { select: { id: true, name: true, image: true, bio: true } },
-        receiver: { select: { id: true, name: true, image: true, bio: true } }
-      }
+      where: { status: 'BLOCKED', requesterId: userId },
+      include: { receiver: { select: { id: true, name: true, image: true, bio: true } } }
     });
 
     // Extract the blocked user (the other participant)
-    const blockedUsers = friendships.map(f => {
-      const blocked = f.requesterId === userId ? f.receiver : f.requester;
-      return { ...blocked, friendshipId: f.id };   // keep friendshipId for unblock
-    });
+    const blockedUsers = friendships.map(f => ({ ...f.receiver, friendshipId: f.id }));
 
     // check if there are more requests after the limit, set next cursor
     let nextCursor = null;
@@ -419,24 +441,25 @@ export async function getFriendshipStatus(req, res, next) {
     // If no target user id provided, return with a message "Missing userId"
     if (!targetId) return res.status(400).json({ message: "Missing userId" });
 
-    // Get the friendship between current user and target user
-    const friendship = await prisma.friendship.findFirst({
-      where: {
-        OR: [
-          { requesterId: currentUserId, receiverId: targetId },
-          { requesterId: targetId, receiverId: currentUserId }
-        ]
-      }
-    });
+     // Get the friendship between current user and target user
+    const rows = await prisma.friendship.findMany({ where: { OR: [
+      { requesterId: currentUserId, receiverId: targetId },
+      { requesterId: targetId, receiverId: currentUserId },
+    ]}});
+    if (rows.length === 0) return res.json({ status: null });
+   
+    const friendship =
+      rows.find(f => f.status === 'BLOCKED' && f.requesterId === currentUserId) ??  // I blocked them
+      rows.find(f => f.status === 'BLOCKED') ??                                      // they blocked me
+      rows.find(f => f.status !== 'DECLINED') ??                                     // not declined
+      null;    
 
-    // If no friendship found, return with status null (treat as no friendship)
-    if (!friendship) return res.json({ status: null });
+    if (!friendship) return res.json({ status: null });  // no relationship -> status = null
 
-    // Get the direction of the friendship (sent or received)
+    // Get the direction of the friendship (sent or received)  
     const direction = friendship.requesterId === currentUserId ? 'sent' : 'received';
-
-    // Respond with the friendship status, id and direction
-    res.json({ status: friendship.status, friendshipId: friendship.id, direction });   
+    res.json({ status: friendship.status, friendshipId: friendship.id, direction });
+  
   } catch (err) { next(err); }                // catch errors and pass to error handler
 }
 

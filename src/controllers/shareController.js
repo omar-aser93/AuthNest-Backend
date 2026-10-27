@@ -23,7 +23,7 @@ export async function sharePost(req, res, next) {
     // Get the original post from the db, If not found return 404 "Post not found", if original post's author is the same as current user return 400 "You cannot share your own post"
     const original = await prisma.post.findUnique({ where: { id: postId } });
     if (!original) return res.status(404).json({ message: "Post not found" });
-    if (original.authorId === req.user.id) return res.status(400).json({ error: "You cannot share your own post" });
+    if (original.authorId === req.user.id) return res.status(400).json({ message: "You cannot share your own post" });
 
     // Setting the privacy utility for the post:
     const friendIds = userId ? await getFriendIdsCached(userId) : [];        // get friends IDs (cached) for current user 

@@ -541,11 +541,15 @@ export async function searchHashtags(req, res, next) {
       };
     }
 
+    // escape special characters for regex
+    if (q.length > 50) return res.json({ hashtags: [], totalPages: 0, currentPage: 1 });
+    const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
     // fetch hashtags from db using aggregation, sort by count, limit by limit value, and return only hashtag and count
     const pipeline = [
       { $match: matchFilter },
       { $unwind: "$hashtags" },
-      { $match: { hashtags: { $regex: `^${q}`, $options: "i" } } },
+      { $match: { hashtags: { $regex: `^${escaped}`, $options: "i" } } },
       { $group: { _id: "$hashtags", count: { $sum: 1 } } },
       { $sort: { count: -1 } },
       { $skip: skip },
@@ -560,7 +564,7 @@ export async function searchHashtags(req, res, next) {
     const totalCountPipeline = [
       { $match: matchFilter },
       { $unwind: "$hashtags" },
-      { $match: { hashtags: { $regex: `^${q}`, $options: "i" } } },
+      { $match: { hashtags: { $regex: `^${escaped}`, $options: "i" } } },
       { $group: { _id: "$hashtags" } },
       { $count: "total" }
     ];
