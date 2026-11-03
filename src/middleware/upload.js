@@ -45,7 +45,9 @@ function chatFileFilter(req, file, cb) {
   if (allowedChatAttachmentTypes.includes(file.mimetype)) {
     cb(null, true);
   } else {
-    cb(new multer.MulterError("LIMIT_UNEXPECTED_FILE", "Invalid file type"), false);
+    const err = new multer.MulterError("LIMIT_UNEXPECTED_FILE", file.fieldname);
+    err.message = `File type "${file.mimetype}" is not allowed for chat attachments`;
+    cb(err);
   }
 }
 

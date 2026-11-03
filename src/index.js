@@ -81,7 +81,7 @@ app.use("/api/v1/admin", adminRoutes);
 app.use((err, req, res, next) => {
   console.error(err);
   const isProd = process.env.NODE_ENV === 'production';
-  const status = err.status || 500;
+  const status = err.status || (err.name === 'MulterError' ? 400 : 500);
   res.status(status).json({ message: status >= 500 && isProd ? 'Server error' : (err.message || 'Server error') });
 });
 
