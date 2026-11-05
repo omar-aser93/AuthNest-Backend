@@ -1,5 +1,10 @@
 import multer from "multer";
 import path from "path";
+import fs from "fs";
+
+// Create uploads folder if it doesn't exist
+const UPLOAD_DIR = path.resolve("uploads");
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 // Allowed MIME types for posts (only images)
 const allowedMimeTypes = [ "image/png", "image/jpg", "image/jpeg", "image/gif", "image/webp" ];     
@@ -22,7 +27,7 @@ const allowedChatAttachmentTypes = [
 // Configure multer storage
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, "uploads/");   // temp folder
+    cb(null, UPLOAD_DIR);   // 'upload' a temp folder
   },
   filename: (req, file, cb) => {
     const unique = Date.now() + "-" + Math.round(Math.random() * 1e9);
