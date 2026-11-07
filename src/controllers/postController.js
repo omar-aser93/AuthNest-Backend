@@ -273,7 +273,7 @@ export async function updatePost(req, res, next) {
     // prepare data object for updating based on req.body
     const data = {};
     if (title) data.title = title;
-    if (content) data.content = cleanContent;   
+    if (content !== undefined) data.content = cleanContent || null;   
     if (privacy) data.privacy = privacy;
 
     // sanitize allowed/blocked arrays — strips "__clear__" sentinel and invalid ObjectIDs (important fix), also handle the case if allowed/blocked is sent as a single string (from FormData)

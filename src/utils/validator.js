@@ -36,7 +36,7 @@ export const postSchema = z.object({
 // ---------------------- UPDATE POST Schema ----------------------
 export const updatePostSchema = z.object({
   title: z.string().min(3).max(120).optional(),
-  content: z.string().min(10).optional(),
+  content: z.string().min(1).max(10000).optional(),
   privacy: z.enum(['PUBLIC', 'FRIENDS', 'ONLY_ME', 'CUSTOM']).optional(),
   //CUSTOM privacy (allowed & blocked) check if no value -> undefined, if array -> store it, if single value -> wrap it in array first
   allowed: z.union([z.array(z.string()), z.string()]).optional().transform(val => { if (!val) return undefined; return Array.isArray(val) ? val : [val]; }),
