@@ -60,9 +60,9 @@ export async function removePostReaction(req, res, next) {
     const { postId } = req.params;                    // Get post id from URL params
     const userId = req.user.id;                       // Get current user id, from req.user (token payload)
 
-    // Delete reaction, if not found return 404 "Reaction not found"
-    const reaction = await prisma.reaction.delete({ where: { userId_postId: { userId, postId } }});
-    if (!reaction) { return res.status(404).json({ message: "Reaction not found" }); }
+    // Delete reactions, if not found return 404 "Reaction not found"
+    const { count } = await prisma.reaction.deleteMany({ where: { userId, postId } });
+    if (count === 0) return res.status(404).json({ message: "Reaction not found" });
 
     // Decrement post reaction count (We use this method instead of [$count or .length] for better performance for large datasets)
     await prisma.post.update({ where: { id: postId }, data: { reactionCount: { decrement: 1 } } });
@@ -97,8 +97,9 @@ export async function reactToComment(req, res, next) {
     if (existingReaction) {
       // If reaction already exists & is of the same reaction type
       if (existingReaction.type === type) {
-        // Same reaction - remove it (toggle off)
+        // Same reaction - remove it (toggle off) & decrement comment reaction count
         await prisma.commentReaction.delete({ where: { userId_commentId: { userId, commentId } } });
+        await prisma.comment.update({ where: { id: commentId }, data: { reactionCount: { decrement: 1 } } });     
         // Return with success message and null reaction
         return res.json({ message: "Reaction removed", reaction: null });
       } else {
@@ -106,8 +107,9 @@ export async function reactToComment(req, res, next) {
         reaction = await prisma.commentReaction.update({ where: { userId_commentId: { userId, commentId } }, data: { type } });
       }
     } else {
-      // If reaction doesn't exist - Create new reaction
+      // If reaction doesn't exist - Create new reaction & increment comment reaction count
       reaction = await prisma.commentReaction.create({ data: { userId, commentId, type }});
+      await prisma.comment.update({ where: { id: commentId }, data: { reactionCount: { increment: 1 } }, });
       // Create notification if not reacting to own comment, using the notification utility function
       if (comment.userId !== userId) { await createNotification('REACTION', { userId: comment.userId, senderId: userId, commentId, postId: comment.postId, reactionType: type }); } }
 
@@ -124,10 +126,13 @@ export async function removeCommentReaction(req, res, next) {
     const { commentId } = req.params;               // Get comment id from URL params
     const userId = req.user.id;                     // Get current user id, from req.user (token payload)
 
-    // Delete reaction, if not found return 404 "Reaction not found"
-    const reaction = await prisma.commentReaction.delete({ where: { userId_commentId: { userId, commentId } } });
-    if (!reaction) { return res.status(404).json({ message: "Reaction not found" }); }
+    // Delete reactions, if not found return 404 "Reaction not found"
+    const { count } = await prisma.commentReaction.deleteMany({ where: { userId, commentId } });
+    if (count === 0) return res.status(404).json({ message: "Reaction not found" });
 
+    // Decrement comment reaction count
+    await prisma.comment.update({ where: { id: commentId }, data: { reactionCount: { decrement: 1 } } });
+    
     res.json({ message: "Reaction removed" });        // Return with success message
   } catch (err) { next(err); }                        // catch errors and pass to error handler
 }
@@ -197,8 +202,9 @@ export async function removeMessageReaction(req, res, next) {
     const message = await prisma.message.findUnique({ where: { id: messageId }, select: { conversationId: true } });
     if (!message) return res.status(404).json({ message: "Message not found" });
 
-    // Delete — will throw P2025 if record doesn't exist, caught by next(err)
-    await prisma.messageReaction.delete({ where: { userId_messageId: { userId, messageId } } });
+    // Delete reactions, if not found return 404 "Reaction not found"
+    const { count: deletedCount  } = await prisma.messageReaction.deleteMany({ where: { userId, messageId } });
+    if (deletedCount === 0) return res.status(404).json({ message: "Reaction not found" });
 
     // Recalculate summary Helper
     const { summary, count } = await recalculateMessageSummary(messageId);
