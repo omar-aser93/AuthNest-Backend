@@ -31,10 +31,10 @@ export async function getPostComments(req, res, next) {
       // replies in chronological, top-level in reverse chronological (newest first), this is common for comment sections. 
       orderBy: [{ createdAt: parentId ? "asc" : "desc" }, { id: parentId ? "asc" : "desc" }],        
       where: { postId, ...(parentId ? { parentId } : { OR: [{ parentId: null }, { parentId: { isSet: false } }] })},    
-      include: { 
-        user: { select: { id: true, name: true, image: true } }, 
-        reactions: req.user?.id ? { where: { userId: req.user.id }, select: { type: true }} : false, 
-        _count: { select: { editHistory: true } },       
+      include: {
+        user: { select: { id: true, name: true, image: true } },
+        reactions: req.user?.id ? { where: { userId: req.user.id }, select: { type: true } } : false,
+        _count: { select: { editHistory: true, reactions: true } },    
       }
     });
 
@@ -43,7 +43,7 @@ export async function getPostComments(req, res, next) {
     if (comments.length > limit) { nextCursor = comments[limit-1].id; comments.pop(); }
     
     // Transform output to array of comments to include myReaction field (needed for UI to show current user's comment reaction without needing extra request) + isEdited
-    const formatted = comments.map(comment => ({ ...comment, myReaction: comment.reactions?.[0]?.type || null, isEdited: comment._count?.editHistory > 0  }));
+    const formatted = comments.map(comment => ({ ...comment, myReaction: comment.reactions?.[0]?.type || null, reactionCount: comment._count?.reactions ?? 0, isEdited: comment._count?.editHistory > 0 }));
     res.json({ nextCursor, comments: formatted });    // respond with comments and next cursor (infinite scroll pagination)
   } catch (err) { next(err); }                        // catch errors and pass to error handler
 }
