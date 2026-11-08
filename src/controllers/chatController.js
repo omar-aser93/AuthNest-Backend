@@ -241,6 +241,23 @@ export async function removeParticipant(req, res, next) {
     // Remove the participant in the DB
     await prisma.conversationParticipant.deleteMany({ where: { conversationId, userId: removeId } });
 
+    // Then check if the group is now empty (count AFTER the delete)
+    const remaining = await prisma.conversationParticipant.count({ where: { conversationId } });
+
+    if (remaining === 0) {
+      // Cascade: Message rows FK-reference Conversation, so `conversation.delete` would fail with a FK violation unless we remove messages first.
+      // 1. Collect all message ids in this conversation
+      const messageIds = await prisma.message.findMany({ where: { conversationId }, select: { id: true } });
+
+      // 2. Delete messages + their children + Cloudinary files, then delete the conversation — in one transaction
+      await prisma.$transaction(async (tx) => {
+        if (messageIds.length > 0) {
+          await deleteMessagesCascade(tx, messageIds.map(m => m.id), deleteFromCloudinary);
+        }
+        await tx.conversation.delete({ where: { id: conversationId } });
+      });
+    }
+
     // Tell removed user's socket to leave the room
     const io = getIO();
     io?.to(`user:${removeId}`).emit('removed_from_conversation', { conversationId });
@@ -268,6 +285,19 @@ export async function deleteConversation(req, res, next) {
     // Remove the participant in the DB
     await prisma.conversationParticipant.deleteMany({ where: { conversationId, userId } });
 
+    // Then check if the group is now empty
+    const remaining = await prisma.conversationParticipant.count({ where: { conversationId } });
+    if (remaining === 0) {
+      const messageIds = await prisma.message.findMany({ where: { conversationId }, select: { id: true } });
+      // Cascade: Message rows FK-reference Conversation, so `conversation.delete` would fail with a FK violation unless we remove messages first.
+      await prisma.$transaction(async (tx) => {
+        if (messageIds.length > 0) {
+          await deleteMessagesCascade(tx, messageIds.map(m => m.id), deleteFromCloudinary);
+        }
+        await tx.conversation.delete({ where: { id: conversationId } });
+      });
+    }
+
     // Tell removed user's socket to leave the room
     const io = getIO();
     io?.to(`user:${userId}`).emit('removed_from_conversation', { conversationId });
@@ -287,13 +317,25 @@ export async function getUnreadCounts(req, res, next) {
     const participations = await prisma.conversationParticipant.findMany({ where: { userId }, select: { conversationId: true } });
     const conversationIds = participations.map(p => p.conversationId);
 
-    // Count unread messages per conversation (not from self, not read)
+    // No conversations → nothing to count, return empty map early
+    if (conversationIds.length === 0) return res.json({ unreadMap: {} });
+
+    // Count unread messages per conversation (not from self, not read) in ONE grouped query
+    // — replaces the old N+1 loop (one count() per conversation) with a single round-trip
+    const grouped = await prisma.message.groupBy({
+      by: ['conversationId'],
+      where: {
+        conversationId: { in: conversationIds },
+        senderId: { not: userId },
+        reads: { none: { userId } },
+      },
+      _count: { _all: true },              // count all matching rows per conversation
+    });
+
+    // Build the unread map: { [conversationId]: count } for conversations with count > 0
     const unreadMap = {};
-    for (const convId of conversationIds) {
-      const count = await prisma.message.count({
-        where: { conversationId: convId, senderId: { not: userId }, reads: { none: { userId } }, }
-      });
-      if (count > 0) unreadMap[convId] = count;
+    for (const row of grouped) {
+      if (row._count._all > 0) unreadMap[row.conversationId] = row._count._all;
     }
 
     res.json({ unreadMap });               // respond with the count
@@ -361,6 +403,19 @@ export async function sendMessageWithAttachments(req, res, next) {
     // Verify user is a participant, if not, return 403 Forbidden 
     const participant = await prisma.conversationParticipant.findUnique({ where: { userId_conversationId: { userId, conversationId } }});
     if (!participant) return res.status(403).json({ message: 'Not a participant' });
+
+    // Verify taggedUserIds are valid
+    if (taggedUserIds.length > 0) {
+      const existing = await prisma.user.findMany({
+        where: { id: { in: taggedUserIds } },
+        select: { id: true },
+      });
+      const existingIds = new Set(existing.map(u => u.id));
+      const missing = taggedUserIds.filter(id => !existingIds.has(id));
+      if (missing.length > 0) {
+        return res.status(400).json({ message: `Invalid tagged user IDs: ${missing.join(', ')}` });
+      }
+    }
 
     // Upload all files to Cloudinary, clean up temp files after each upload
     const uploadedAttachments = [];
