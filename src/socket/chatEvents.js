@@ -1,4 +1,5 @@
 import { prisma } from '../prisma.js';
+import { sendChatPushToConversation } from '../utils/pushNotificationHelper.js';
 import { endCallIfNoActiveParticipants as endCallIfNoActiveParticipantsShared, createCallSystemMessage as makeSystemMessage } from './callHelpers.js'
 
 // Shared message include shape — reused across send/edit to keep emitted shape consistent
@@ -41,11 +42,20 @@ export const handleChatEvents = (io, socket, onlineUsers) => {
       // Broadcast to everyone in the room (including sender)
       io.to(`conversation:${conversationId}`).emit('new_message', message);
 
+      // Send push notification
+      sendChatPushToConversation( io, conversationId, userId, socket.user.name ?? 'Someone', content.trim().slice(0, 120)).catch(() => {});
+
       ack?.({ success: true, message });                  // Send success response & the message
     } catch (err) {
       console.error('send_message error:', err);          // Log the error
       ack?.({ error: 'Failed to send message' });         // Send error response
     }
+  });
+
+
+  // ─── View Conversation ───────────────────────────────────────────────────────
+  socket.on('viewing_conversation', ({ conversationId }) => {
+    socket.data.viewing = conversationId ?? null;
   });
 
 

@@ -67,13 +67,15 @@ export default async function auth(req, res, next) {
     // ── Ban check for apps with Admin ban system — small indexed _id lookup runs on every authenticated request, or we can comment it & allow banned user 15 min until token expires ────────────────
     // If the user was banned after their token was issued, this catches it on their next request rather than waiting for the 15-min token expiry.
     // At scaling up, replace with Redis cache or socket.io to force_logout
-    const fresh = await prisma.user.findUnique({ where: { id: payload.sub }, select: { bannedAt: true, role: true } });
+    const fresh = await prisma.user.findUnique({ where: { id: payload.sub }, select: { bannedAt: true, role: true, name: true } });
     if (!fresh) { return res.status(401).json({ message: 'User no longer exists' });}
     if (fresh?.bannedAt) { return res.status(403).json({ message: 'Your account has been suspended' }) }
 
     // set req.user with user id and role:
     // req.user = { id: payload.sub, role: payload.role };    // when there is no ban check
-    req.user = { id: payload.sub, role: fresh.role };
+
+    // set req.user with user id and role: (id & role are used in many controllers, name is needed only for push notifications)
+    req.user = { id: payload.sub, role: fresh.role, name: fresh.name };   
     next();
   } catch (err) {
     // if token is invalid or expired, return 401

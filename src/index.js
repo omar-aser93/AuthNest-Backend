@@ -8,6 +8,7 @@ import morgan from 'morgan';
 import helmet from 'helmet';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
+import { startPushReceiptReaper } from './utils/pushNotificationHelper.js';
 import authRoutes from './routes/v1/authRoutes.js';
 import userRoutes from './routes/v1/userRoutes.js';
 //import v2UserRoutes from './routes/v2/userRoutes.js';   // v2 routes (future updates, without breaking old apps that still use v1 routes)
@@ -87,4 +88,7 @@ app.use((err, req, res, next) => {
 
 // Start the server (with Socket.io support as well)
 const PORT = process.env.PORT || 5000;
-httpServer.listen(PORT, () => console.log(`Server listening on ${PORT}`));
+httpServer.listen(PORT, () => {
+  console.log(`Server listening on ${PORT}`);       // Log when server starts
+  startPushReceiptReaper();                         // Start push notification receipt reaper
+});

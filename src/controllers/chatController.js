@@ -3,6 +3,7 @@ import { AccessToken } from 'livekit-server-sdk';
 import { uploadToCloudinary, deleteFromCloudinary } from '../utils/uploadToCloudinary.js';
 import { deleteMessagesCascade } from "../utils/cascadeDelete.js";
 import { getIO } from '../socket/index.js';
+import { sendChatPushToConversation } from '../utils/pushNotificationHelper.js';
 import { sanitizeText } from '../utils/XSS-sanitization.js';
 import fs from 'fs';
 
@@ -457,6 +458,17 @@ export async function sendMessageWithAttachments(req, res, next) {
     const io = getIO();
     io?.to(`conversation:${conversationId}`).emit('new_message', message);
 
+    // create preview for push notification
+    const preview = content?.trim() ? content.trim().slice(0, 120)
+      : uploadedAttachments[0]?.fileType === 'image' ? '📷 Photo'
+      : uploadedAttachments[0]?.fileType === 'video' ? '🎥 Video'
+      : uploadedAttachments[0]?.fileType === 'audio' ? '🎤 Voice message'
+      : '📎 File';
+    // send push notification
+    if (io) {
+      sendChatPushToConversation( io, conversationId, userId, req.user.name ?? 'Someone', preview ).catch(() => {});
+    }
+
     res.status(201).json({ message });        // respond with created message
   } catch (err) { next(err); }                // if error, pass to error handler
 }
@@ -505,7 +517,14 @@ export async function sendGif(req, res, next) {
       return created;
     });
     // Broadcast via socket
-    getIO()?.to(`conversation:${conversationId}`).emit("new_message", message);
+    const io = getIO();
+    io?.to(`conversation:${conversationId}`).emit("new_message", message);    
+
+    // send push notification  
+    if (io) {
+      sendChatPushToConversation( io, conversationId, userId,  req.user.name ?? 'Someone', '🎞️ GIF' ).catch(() => {});
+    }
+    
     res.status(201).json({ message });    // respond with created message
   } catch (err) { next(err); }            // if error, pass to error handler
 }

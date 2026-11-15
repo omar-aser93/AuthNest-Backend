@@ -1,5 +1,6 @@
 import { prisma } from '../prisma.js';
 import { getIO } from '../socket/index.js';
+import { sendPushToUser } from './pushNotificationHelper.js';
 
 // ---------------- CREATE A NOTIFICATION ----------------
 export async function createNotification(type, data) {
@@ -22,6 +23,32 @@ export async function createNotification(type, data) {
 
   // 4. socket: Emit to recipient's personal room so their bell badge increments live  
   getIO()?.to(`user:${userId}`).emit('new_notification', { count: 1 });
+
+  // 5. Send push notification — only for NEW notifications. Detached: do not await.
+  void (async () => {
+    try {
+      const sender = senderId ? await prisma.user.findUnique({ where: { id: senderId }, select: { name: true } }) : null;
+      const senderName = sender?.name ?? 'Someone';
+      // set notification types
+      const TYPE_MESSAGES = {
+        REACTION:    { title: 'New reaction', body: commentId ? `${senderName} reacted to your comment` : `${senderName} reacted to your post` },
+        COMMENT:     { title: 'New comment',  body: `${senderName} commented on your post` },
+        REPLY:       { title: 'New reply',    body: `${senderName} replied to your comment` },
+        SHARE:       { title: 'New share',    body: `${senderName} shared your post` },
+        TAG:         { title: 'New mention',  body: `${senderName} mentioned you` },
+        FRIEND_REQUEST:        { title: 'Friend request',   body: `${senderName} sent you a friend request` },
+        FRIEND_REQUEST_ACCEPT: { title: 'Request accepted', body: `${senderName} accepted your friend request` },
+      };
+      const spec = TYPE_MESSAGES[type];       // Get the notification type
+      if (!spec) return;                      // If type not found, return
+      // Get the URL to navigate to
+      const url = type === 'FRIEND_REQUEST' ? '/friends' : type === 'FRIEND_REQUEST_ACCEPT' && senderId ? `/users/${senderId}` : postId ? `/posts/${postId}` : '/notifications';
+
+      await sendPushToUser(userId, { ...spec, data: { url } });               // Send push
+    } catch (err) {
+      console.error('[push] createNotification push failed:', err.message);   // console log the push errors
+    }
+  })();
 
   return notification;    // Return the created notification
 }

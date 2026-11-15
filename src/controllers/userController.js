@@ -1,4 +1,5 @@
 import { prisma } from '../prisma.js';
+import { Expo } from 'expo-server-sdk';
 import { getIO } from '../socket/index.js';
 import { uploadToCloudinary } from "../utils/uploadToCloudinary.js";
 import { hashItem, compareHashed } from "../utils/hash.js";
@@ -242,4 +243,58 @@ export async function searchUsers(req, res, next) {
 
     res.json({ users, nextCursor });           // respond with found users and nextCursor for pagination
   } catch (err) { next(err); }                 // catch errors and pass to the error handler
+}
+
+
+
+// -------------------- PUSH NOTIFICATIONS TOKEN CONTROLLERS ------------------------------
+// ---------------- REGISTER PUSH TOKEN (on app start / login) ----------------
+export async function registerPushToken(req, res, next) {
+  try {
+    const userId = req.user.id;                     // get user id from req.user (token payload)
+    const { token, platform } = req.body;           // get token and platform from req.body
+
+    // validate the token and the platform
+    if (!Expo.isExpoPushToken(token)) {
+      return res.status(400).json({ message: 'Invalid Expo push token' });
+    }
+    if (!['ios', 'android'].includes(platform)) {
+      return res.status(400).json({ message: 'platform must be ios or android' });
+    }
+
+    // upsert the push token
+    let saved;
+    try {
+      saved = await prisma.pushToken.upsert({
+        where: { token },
+        update: { userId, platform },
+        create: { token, platform, userId },
+      });
+    } catch (err) {
+      // P2002 = unique constraint. Two concurrent upserts can race.
+      // Retry once as an update — the row must exist by now.
+      if (err.code === 'P2002') {
+        saved = await prisma.pushToken.update({
+          where: { token },
+          data: { userId, platform },
+        });
+      } else throw err;
+    }
+
+    res.json({ pushToken: saved });               // respond with saved push token
+  } catch (err) { next(err); }                    // catch errors and pass to error handler
+}
+
+
+
+// ---------------- UNREGISTER PUSH TOKEN (on logout) ----------------
+export async function unregisterPushToken(req, res, next) {
+  try {
+    // get token from req.body, if not provided, return 400 "token is required"
+    const { token } = req.body;
+    if (!token) return res.status(400).json({ message: 'token is required' });
+    // delete the push token & respond with "Push token removed"
+    await prisma.pushToken.deleteMany({ where: { token, userId: req.user.id } });
+    res.json({ message: 'Push token removed' });
+  } catch (err) { next(err); }                        // catch errors and pass to error handler
 }

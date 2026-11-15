@@ -48,6 +48,7 @@ model User {
   editHistory          EditHistory[]                                     // relation to EditHistory model
   notifications        Notification[]                                    // relation to Notification model (received notifications)
   notificationsSent    Notification[]    @relation("NotificationSender") // relation to Notification model (notifications I caused)
+  pushTokens           PushToken[]                                       // relation to PushToken model
   reportsMade          Report[] @relation("ReportsMade")                 // relation -> reports I made
   reportsReviewed      Report[] @relation("ReportsReviewed")             // relation -> reports I reviewed
   // ── Ban fields ─────────────────────────────────────────────────────────
@@ -301,6 +302,17 @@ model Notification {
   @@index([userId, createdAt])
 }
 
+//PushToken model to store push notification tokens
+model PushToken {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String   @db.ObjectId
+  token     String   @unique                     // @unique — one token per physical device
+  platform  String                               // 'ios' | 'android'
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([userId])
+}
 
 
 // (Post/Comment Reaction options) enum 

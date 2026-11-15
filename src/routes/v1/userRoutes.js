@@ -5,10 +5,13 @@ import { csrfProtection } from "../../middleware/csrf.js";
 import { validate } from '../../middleware/validate.js';
 import { changePasswordSchema } from '../../utils/validator.js';
 import { upload } from "../../middleware/upload.js";
-import { getMyProfile, getMyStats, getUserById, updateUser, changePassword, deleteUser, searchUsersForMention, searchUsers } from '../../controllers/userController.js';
+import { getMyProfile, getMyStats, getUserById, updateUser, changePassword, deleteUser, searchUsersForMention, searchUsers, registerPushToken, unregisterPushToken } from '../../controllers/userController.js';
 
 const router = express.Router();                 // Create router instance
 
+// Push-notification Token routes, should be set before other user routes
+router.post('/push-token', auth, registerPushToken);
+router.delete('/push-token', auth, unregisterPushToken);
 
 router.get('/me', auth, getMyProfile);                   // get my profile (protected)
 router.get('/me/stats', auth, getMyStats);               // get my stats (protected)
