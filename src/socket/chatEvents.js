@@ -318,14 +318,19 @@ export const handleChatEvents = (io, socket, onlineUsers) => {
       // Find the participant record for this user
       const participant = await prisma.callParticipant.findFirst({ where: { callId, userId }, include: { call: true } });
       if (!participant) return;
-      // Update status to REJECTED
-      await prisma.callParticipant.update({ where: { id: participant.id }, data: { status: 'REJECTED' } });
-      // Notify the caller that this user rejected the call
-      io.to(`conversation:${participant.call.conversationId}`).emit('call_participant_rejected', { callId, userId } );
+      // Atomic: only allow transition from RINGING → REJECTED.
+      // If the call already ended (caller hung up) OR the participant already timed out (MISSED) OR was marked ENDED/LEFT — the update is a no-op.
+      const result = await prisma.callParticipant.updateMany({
+        where: { id: participant.id, status: 'RINGING' },
+        data: { status: 'REJECTED' },
+      });
+      if (result.count === 0) return;   // already resolved — don't touch anything
+
+      // Only emit + end-check if the status actually changed
+      io.to(`conversation:${participant.call.conversationId}`).emit('call_participant_rejected', { callId, userId });
       io.to(`user:${participant.call.callerId}`).emit('call_rejected', { callId, userId });
       io.to(`user:${userId}`).emit('call_rejected', { callId, userId });
-      // Auto‑end the call if no one else is RINGING or ACTIVE (except caller)
-      await endCallIfNoActiveParticipants( callId, participant.call.conversationId, participant.call.callerId );
+      await endCallIfNoActiveParticipants(callId, participant.call.conversationId, participant.call.callerId);
     } catch (err) {
       console.error('call_reject error:', err);
     }
@@ -338,11 +343,18 @@ export const handleChatEvents = (io, socket, onlineUsers) => {
       // Find the participant record for this user
       const participant = await prisma.callParticipant.findFirst({ where: { callId, userId }, include: { call: true } });
       if (!participant) return;
-      // Update status and leftAt
-      await prisma.callParticipant.update({ where: { id: participant.id }, data: { status: 'LEFT', leftAt: new Date() } });
-      // Notify everyone in the conversation that this user left
+      // Atomic: only transition from ACTIVE or RINGING → LEFT.
+      // If already ENDED/MISSED/REJECTED — the call is over, don't touch it.
+      const result = await prisma.callParticipant.updateMany({
+        where: { id: participant.id, status: { in: ['ACTIVE', 'RINGING'] } },
+        data: { status: 'LEFT', leftAt: new Date() },
+      });
+      if (result.count === 0) return;   // call already ended — nothing to do
+      
+      // Only emit + end-check if the status actually changed
       io.to(`conversation:${participant.call.conversationId}`).emit('call_participant_left', { callId, userId });
       const activeParticipants = await prisma.callParticipant.count({ where: { callId, status: 'ACTIVE' } });
+      // If there are no active participants left, end the call
       if (activeParticipants === 0) {
         // Anyone still ringing (the caller hung up before they answered) must stop ringing
         const stillRinging = await prisma.callParticipant.findMany({ where: { callId, status: 'RINGING' }, select: { userId: true } });
@@ -356,7 +368,7 @@ export const handleChatEvents = (io, socket, onlineUsers) => {
         const durationStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
         await createCallSystemMessage(participant.call.conversationId, `📞 Call ended · ${durationStr}`);
         // Emit call_ended_all to the conversation room so clients can close the call UI
-        io.to(`conversation:${participant.call.conversationId}`).emit( 'call_ended_all', { callId });
+        io.to(`conversation:${participant.call.conversationId}`).emit('call_ended_all', { callId });
       }
     } catch (err) {
       console.error('call_leave error:', err);
@@ -368,8 +380,8 @@ export const handleChatEvents = (io, socket, onlineUsers) => {
   socket.on('call_end_all', async ({ callId }) => {
     try {
       // Find the call and verify that the requester is the caller
-      const call = await prisma.call.findUnique({ where: { id: callId }, select: { callerId: true, conversationId: true, startedAt: true } });
-      if (!call || call.callerId !== userId) return;
+      const call = await prisma.call.findUnique({ where: { id: callId }, select: { callerId: true, conversationId: true, startedAt: true, endedAt: true  } });
+      if (!call || call.callerId !== userId || call.endedAt) return;
       const stillRinging = await prisma.callParticipant.findMany({ where: { callId, status: 'RINGING' }, select: { userId: true } });
       // Mark all participants as ended and set call.endedAt
       await prisma.$transaction([
