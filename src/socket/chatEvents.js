@@ -1,5 +1,6 @@
 import { prisma } from '../prisma.js';
-import { sendChatPushToConversation } from '../utils/pushNotificationHelper.js';
+import { sendPushToUser,sendChatPushToConversation } from '../utils/pushNotificationHelper.js';
+import { sendIncomingCallPush, sendCallEndedPush } from '../utils/callPushHelper.js';
 import { endCallIfNoActiveParticipants as endCallIfNoActiveParticipantsShared, createCallSystemMessage as makeSystemMessage } from './callHelpers.js'
 
 // Shared message include shape — reused across send/edit to keep emitted shape consistent
@@ -202,53 +203,83 @@ export const handleChatEvents = (io, socket, onlineUsers) => {
     try {
       // Verify caller is a participant
       const participant = await prisma.conversationParticipant.findUnique({ where: { userId_conversationId: { userId, conversationId } } });
-      if (!participant) return;
+      if (!participant) return ack?.({ error: 'Not a participant' });
 
-      // Get all participants in this conversation
+      // Get all other participants
       const participants = await prisma.conversationParticipant.findMany({ where: { conversationId }, select: { userId: true } });
       const otherUserIds = participants.map(p => p.userId).filter(id => id !== userId);
-      if (otherUserIds.length === 0) return;   // if no one else to call, just return 
+      if (otherUserIds.length === 0) return ack?.({ error: 'No one to call' });
 
-      // ✅ Prevent multiple active calls in same conversation
-      const existingActiveCall = await prisma.call.findFirst({ where: { conversationId, endedAt: null }, });
-      if (existingActiveCall) { return socket.emit('call_error', { message: 'A call is already active in this conversation.' }); }
+      // Close calls that were never ended (server restart / crash) so they can't block this conversation forever
+      await prisma.call.updateMany({
+        where: { conversationId, endedAt: null, startedAt: { lt: new Date(Date.now() - 2 * 60 * 60 * 1000) } },
+        data: { endedAt: new Date() },
+      });
+
+      // Prevent multiple active calls in the same conversation
+      const existingActiveCall = await prisma.call.findFirst({ where: { conversationId, endedAt: null } });
+      if (existingActiveCall) {
+        socket.emit('call_error', { message: 'A call is already active in this conversation.' });
+        return ack?.({ error: 'A call is already active in this conversation.' });
+      }
 
       // Create the call record
       const call = await prisma.call.create({
-        data: { conversationId, callerId: userId, callType: callType === 'video' ? 'VIDEO' : 'AUDIO',
+        data: {
+          conversationId, callerId: userId, callType: callType === 'video' ? 'VIDEO' : 'AUDIO',
           participants: {
             create: [
-              // ✅ caller
               { userId, status: 'ACTIVE', joinedAt: new Date() },
-              // ✅ invited users
               ...otherUserIds.map(calleeId => ({ userId: calleeId, status: 'RINGING' })),
             ],
           },
         },
-        include: { participants: {include: { user: { select: { id: true, name: true, image: true }, }, }, }, }, 
       });
 
-      // Send callId back to caller via ack
       ack?.({ callId: call.id });
-      // Send incoming_call to each invited user
+
+      // Ring every callee: socket (web + fallback) AND FCM (mobile, works when the app is killed)
       for (const calleeId of otherUserIds) {
         io.to(`user:${calleeId}`).emit('incoming_call', { callId: call.id, conversationId, from: userId, fromName: socket.user.name, callType });
+
+        sendIncomingCallPush(calleeId, {
+          callId: call.id, conversationId, callerId: userId,
+          callerName: socket.user.name, callerImage: socket.user.image, callType,
+        })
+          .then((sent) => {
+            // Callee has no FCM token (old build / permission off) → fall back to a normal push
+            if (sent === 0) {
+              return sendPushToUser(calleeId, {
+                title: socket.user.name ?? 'Incoming call',
+                body: `Incoming ${callType} call`,
+                data: { url: `/messages/${conversationId}` },
+              });
+            }
+          })
+          .catch(err => console.error('[call-push] ring failed:', err.message));
       }
-     
-      // Auto‑miss timeout: after 30 seconds, update all still‑ringing participants to MISSED
+
+      // Auto-miss after 30 s
       setTimeout(async () => {
         try {
-          const missedParticipants = await prisma.callParticipant.findMany({ where: { callId: call.id, status: 'RINGING' }, select: { userId: true }});
-          if (missedParticipants.length) {
-            // Update all still-RINGING participants to MISSED
-            await prisma.callParticipant.updateMany({ where: { callId: call.id, status: 'RINGING' }, data: { status: 'MISSED' } });
-            // Add system message for missed call
-            await createCallSystemMessage(conversationId, `📞 Missed ${callType} call`);
-            // Notify the caller which users missed the call
-            io.to(`user:${userId}`).emit('call_missed', { callId: call.id, conversationId, missedBy: missedParticipants.map(p => p.userId) });
-            // Auto‑end if no other participant is RINGING or ACTIVE (only caller left)
-            await endCallIfNoActiveParticipants(call.id, conversationId, userId);
+          const missedParticipants = await prisma.callParticipant.findMany({ where: { callId: call.id, status: 'RINGING' }, select: { userId: true } });
+          if (missedParticipants.length === 0) return;
+
+          await prisma.callParticipant.updateMany({ where: { callId: call.id, status: 'RINGING' }, data: { status: 'MISSED' } });
+          await createCallSystemMessage(conversationId, `📞 Missed ${callType} call`);
+          io.to(`user:${userId}`).emit('call_missed', { callId: call.id, conversationId, missedBy: missedParticipants.map(p => p.userId) });
+
+          // Stop the ring on the callee's phone + tell them they missed it
+          for (const { userId: missedId } of missedParticipants) {
+            sendCallEndedPush(missedId, { callId: call.id, reason: 'unanswered' }).catch(() => {});
+            sendPushToUser(missedId, {
+              title: 'Missed call',
+              body: `${socket.user.name ?? 'Someone'} called you`,
+              data: { url: `/messages/${conversationId}` },
+            }).catch(() => {});
           }
+
+          await endCallIfNoActiveParticipants(call.id, conversationId, userId);
         } catch (err) {
           console.error('call timeout error:', err);
         }
@@ -266,12 +297,15 @@ export const handleChatEvents = (io, socket, onlineUsers) => {
       // Find the participant record for this user
       const participant = await prisma.callParticipant.findFirst({ where: { callId, userId }, include: { call: true } });
       if (!participant) return;
+      // Call already ended (caller hung up / timed out) → tell this client to close its UI
+      if (participant.call.endedAt) return socket.emit('call_ended_all', { callId });
       // Update status and joinedAt
       await prisma.callParticipant.update({ where: { id: participant.id }, data: { status: 'ACTIVE', joinedAt: new Date() } });
-      // Notify everyone in the conversation (or just the caller) that this user joined, You can emit to the conversation room or to personal rooms
-      io.to(`conversation:${participant.call.conversationId}`).emit('call_participant_joined', {
-        callId, userId, userName: socket.user.name,
-      });
+      // Notify the caller that this user accepted the call
+      io.to(`conversation:${participant.call.conversationId}`).emit('call_participant_joined', { callId, userId, userName: socket.user.name });
+      // The event the clients actually listen for (stops the caller's dial tone, clears stale incoming UI)
+      io.to(`user:${participant.call.callerId}`).emit('call_answered', { callId, userId });
+      io.to(`user:${userId}`).emit('call_answered', { callId, userId });
     } catch (err) {
       console.error('call_answer error:', err);
     }
@@ -288,6 +322,8 @@ export const handleChatEvents = (io, socket, onlineUsers) => {
       await prisma.callParticipant.update({ where: { id: participant.id }, data: { status: 'REJECTED' } });
       // Notify the caller that this user rejected the call
       io.to(`conversation:${participant.call.conversationId}`).emit('call_participant_rejected', { callId, userId } );
+      io.to(`user:${participant.call.callerId}`).emit('call_rejected', { callId, userId });
+      io.to(`user:${userId}`).emit('call_rejected', { callId, userId });
       // Auto‑end the call if no one else is RINGING or ACTIVE (except caller)
       await endCallIfNoActiveParticipants( callId, participant.call.conversationId, participant.call.callerId );
     } catch (err) {
@@ -306,11 +342,13 @@ export const handleChatEvents = (io, socket, onlineUsers) => {
       await prisma.callParticipant.update({ where: { id: participant.id }, data: { status: 'LEFT', leftAt: new Date() } });
       // Notify everyone in the conversation that this user left
       io.to(`conversation:${participant.call.conversationId}`).emit('call_participant_left', { callId, userId });
-      // Check if there are any active participants left
-      const activeParticipants = await prisma.callParticipant.count({ where: { callId, status: 'ACTIVE', } });
-      // If no active participants left, end the call
+      const activeParticipants = await prisma.callParticipant.count({ where: { callId, status: 'ACTIVE' } });
       if (activeParticipants === 0) {
+        // Anyone still ringing (the caller hung up before they answered) must stop ringing
+        const stillRinging = await prisma.callParticipant.findMany({ where: { callId, status: 'RINGING' }, select: { userId: true } });
+        await prisma.callParticipant.updateMany({ where: { callId, status: 'RINGING' }, data: { status: 'ENDED', leftAt: new Date() } });
         await prisma.call.update({ where: { id: callId }, data: { endedAt: new Date() } });
+        for (const r of stillRinging) sendCallEndedPush(r.userId, { callId }).catch(() => {});
         // Calculate duration and create system message "Call ended · 5m 30s"
         const durationSeconds = Math.floor((Date.now() - new Date(participant.call.startedAt).getTime()) / 1000);
         const mins = Math.floor(durationSeconds / 60);
@@ -332,6 +370,7 @@ export const handleChatEvents = (io, socket, onlineUsers) => {
       // Find the call and verify that the requester is the caller
       const call = await prisma.call.findUnique({ where: { id: callId }, select: { callerId: true, conversationId: true, startedAt: true } });
       if (!call || call.callerId !== userId) return;
+      const stillRinging = await prisma.callParticipant.findMany({ where: { callId, status: 'RINGING' }, select: { userId: true } });
       // Mark all participants as ended and set call.endedAt
       await prisma.$transaction([
         prisma.callParticipant.updateMany({ where: { callId, status: { in: ['ACTIVE', 'RINGING'] } }, data: { status: 'ENDED', leftAt: new Date() } }),
@@ -341,6 +380,7 @@ export const handleChatEvents = (io, socket, onlineUsers) => {
       await createCallSystemMessage(call.conversationId, `📞 Call ended`);
       // Emit call_ended_all to the conversation room so clients can close the call UI
       io.to(`conversation:${call.conversationId}`).emit('call_ended_all', { callId });
+      for (const r of stillRinging) sendCallEndedPush(r.userId, { callId }).catch(() => {});
     } catch (err) { 
       console.error('call_end_all error:', err);
     }

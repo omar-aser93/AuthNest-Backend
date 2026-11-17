@@ -5,13 +5,15 @@ import { csrfProtection } from "../../middleware/csrf.js";
 import { validate } from '../../middleware/validate.js';
 import { changePasswordSchema } from '../../utils/validator.js';
 import { upload } from "../../middleware/upload.js";
-import { getMyProfile, getMyStats, getUserById, updateUser, changePassword, deleteUser, searchUsersForMention, searchUsers, registerPushToken, unregisterPushToken } from '../../controllers/userController.js';
+import { getMyProfile, getMyStats, getUserById, updateUser, changePassword, deleteUser, searchUsersForMention, searchUsers, registerPushToken, unregisterPushToken, registerVoipToken, unregisterVoipToken } from '../../controllers/userController.js';
 
 const router = express.Router();                 // Create router instance
 
-// Push-notification Token routes, should be set before other user routes
+// Push-notification & Voip-notification Tokens routes, should be set before other user routes
 router.post('/push-token', auth, registerPushToken);
 router.delete('/push-token', auth, unregisterPushToken);
+router.post('/voip-token', auth, registerVoipToken);
+router.delete('/voip-token', auth, unregisterVoipToken);
 
 router.get('/me', auth, getMyProfile);                   // get my profile (protected)
 router.get('/me/stats', auth, getMyStats);               // get my stats (protected)

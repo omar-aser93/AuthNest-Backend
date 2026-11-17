@@ -49,6 +49,7 @@ model User {
   notifications        Notification[]                                    // relation to Notification model (received notifications)
   notificationsSent    Notification[]    @relation("NotificationSender") // relation to Notification model (notifications I caused)
   pushTokens           PushToken[]                                       // relation to PushToken model
+  voipTokens           VoipToken[]                                       // relation to VoipToken model
   reportsMade          Report[] @relation("ReportsMade")                 // relation -> reports I made
   reportsReviewed      Report[] @relation("ReportsReviewed")             // relation -> reports I reviewed
   // ── Ban fields ─────────────────────────────────────────────────────────
@@ -309,6 +310,18 @@ model PushToken {
   userId    String   @db.ObjectId
   token     String   @unique                     // @unique — one token per physical device
   platform  String                               // 'ios' | 'android'
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([userId])
+}
+
+//VoipToken model to store voip notification tokens
+model VoipToken {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String   @db.ObjectId
+  token     String   @unique
+  type      String   // 'FCM' (iOS APNS_VOIP later)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   @@index([userId])

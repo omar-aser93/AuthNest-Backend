@@ -298,3 +298,31 @@ export async function unregisterPushToken(req, res, next) {
     res.json({ message: 'Push token removed' });
   } catch (err) { next(err); }                        // catch errors and pass to error handler
 }
+
+
+
+// ---------------- REGISTER VOIP TOKEN ----------------
+export async function registerVoipToken(req, res, next) {
+  try {
+    const { token, type } = req.body;       // get token and type from req.body
+    // validate the token and the type
+    if (!token || !['FCM', 'APNS_VOIP'].includes(type)) return res.status(400).json({ message: 'Invalid token' });
+    // upsert the voip token
+    await prisma.voipToken.upsert({ where: { token }, update: { userId: req.user.id, type }, create: { token, type, userId: req.user.id } });
+    res.json({ message: 'Voip token saved' });        // respond with "Voip token saved"
+  } catch (err) { next(err); }                        // catch errors and pass to error handler
+}
+
+
+
+// ---------------- UNREGISTER VOIP TOKEN ----------------
+export async function unregisterVoipToken(req, res, next) {
+  try {
+    // get token from req.body, if not provided, return 400 "token required"
+    const { token } = req.body;           
+    if (!token) return res.status(400).json({ message: 'token required' });
+    // delete the voip token
+    await prisma.voipToken.deleteMany({ where: { token, userId: req.user.id } });
+    res.json({ message: 'Voip token removed' });        // respond with "Voip token removed"
+  } catch (err) { next(err); }                          // catch errors and pass to error handler
+}
