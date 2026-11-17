@@ -30,23 +30,23 @@ async function sendToUserDevices(userId, data) {
   if (!messaging) return 0;
 
   const rows = await prisma.voipToken.findMany({ where: { userId, type: 'FCM' }, select: { token: true } });
+  let sent = 0;
+
   await Promise.all(rows.map(async ({ token }) => {
     try {
-      await messaging.send({
-        token,
-        data,                                        // data ONLY — a `notification` key would bypass the call UI
-        android: { priority: 'high', ttl: 30_000 },  // a ring is worthless after 30 s
-      });
+      await messaging.send({ token, data, android: { priority: 'high', ttl: 30_000 } });
+      sent++;
     } catch (err) {
       const code = err?.code;
       if (code === 'messaging/registration-token-not-registered' || code === 'messaging/invalid-registration-token') {
-        await prisma.voipToken.deleteMany({ where: { token } }).catch(() => {});   // dead token
+        await prisma.voipToken.deleteMany({ where: { token } }).catch(() => {});
       } else {
         console.error('[call-push] send failed:', code, err?.message);
       }
     }
   }));
-  return rows.length;
+
+  return sent;
 }
 
 // ─── Ring the callee's phone ─────────────────────────────────────────────────
